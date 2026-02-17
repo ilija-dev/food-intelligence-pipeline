@@ -1,0 +1,167 @@
+# =============================================================================
+# Food Intelligence Pipeline Configuration
+# =============================================================================
+# Single source of truth for all notebooks. Change paths here, not in code.
+# Platform: Databricks Free Edition (Community)
+
+# ---------------------------------------------------------------------------
+# Data Sources
+# ---------------------------------------------------------------------------
+data_sources:
+  # Option A: Parquet from HuggingFace (recommended for development)
+  # ~1.2GB, pre-filtered columns, fastest to get started
+  parquet:
+    url: "https://huggingface.co/datasets/openfoodfacts/product-database/resolve/main/food.parquet"
+    dbfs_path: "/FileStore/food-intelligence/raw/food.parquet"
+    format: "parquet"
+
+  # Option B: Full JSONL dump (production / impressive for interviews)
+  # ~7GB compressed, 43GB decompressed, 200+ columns, 3M+ products
+  jsonl:
+    url: "https://static.openfoodfacts.org/data/openfoodfacts-products.jsonl.gz"
+    dbfs_path: "/FileStore/food-intelligence/raw/openfoodfacts-products.jsonl.gz"
+    format: "jsonl"
+
+  # Field reference documentation
+  field_reference: "https://static.openfoodfacts.org/data/data-fields.txt"
+
+# Active source: switch between "parquet" and "jsonl"
+active_source: "parquet"
+
+# ---------------------------------------------------------------------------
+# Database / Schema
+# ---------------------------------------------------------------------------
+database:
+  name: "food_intelligence"
+  # Catalog is only used if Unity Catalog is enabled (not on Community Edition)
+  catalog: "hive_metastore"
+
+# ---------------------------------------------------------------------------
+# Delta Table Paths (DBFS)
+# ---------------------------------------------------------------------------
+delta_tables:
+  bronze:
+    products: "/FileStore/food-intelligence/delta/bronze/products"
+  silver:
+    products: "/FileStore/food-intelligence/delta/silver/products"
+  gold:
+    nutrition_by_category: "/FileStore/food-intelligence/delta/gold/nutrition_by_category"
+    brand_scorecard: "/FileStore/food-intelligence/delta/gold/brand_scorecard"
+    category_comparison: "/FileStore/food-intelligence/delta/gold/category_comparison"
+    country_nutriscore: "/FileStore/food-intelligence/delta/gold/country_nutriscore"
+    ultra_processing_by_country: "/FileStore/food-intelligence/delta/gold/ultra_processing_by_country"
+    nutriscore_vs_nova: "/FileStore/food-intelligence/delta/gold/nutriscore_vs_nova"
+    allergen_prevalence: "/FileStore/food-intelligence/delta/gold/allergen_prevalence"
+    allergen_free_options: "/FileStore/food-intelligence/delta/gold/allergen_free_options"
+
+# ---------------------------------------------------------------------------
+# Silver Layer: Column Selection
+# ---------------------------------------------------------------------------
+# These are the ~40 columns we keep from the raw 200+ column dataset.
+# Everything else is preserved in Bronze for auditability.
+silver_columns:
+  identification:
+    - code                    # Barcode (EAN-13) - primary key
+    - product_name
+    - brands
+    - brands_tags
+    - categories_tags
+    - countries_tags
+    - stores
+    - url
+
+  nutrition:
+    - energy-kcal_100g
+    - energy_100g
+    - fat_100g
+    - saturated-fat_100g
+    - carbohydrates_100g
+    - sugars_100g
+    - fiber_100g
+    - proteins_100g
+    - salt_100g
+    - sodium_100g
+
+  scores:
+    - nutriscore_grade
+    - nutriscore_score
+    - nova_group
+    - ecoscore_grade
+    - ecoscore_score
+
+  allergens:
+    - allergens_tags
+    - traces_tags
+
+  ingredients:
+    - ingredients_text
+    - ingredients_tags
+    - additives_tags
+    - additives_n
+
+  metadata:
+    - completeness
+    - created_datetime
+    - last_modified_datetime
+    - creator
+    - last_editor
+
+# ---------------------------------------------------------------------------
+# Data Quality Thresholds
+# ---------------------------------------------------------------------------
+quality:
+  # Minimum completeness score (0-1) to include in Silver
+  min_completeness: 0.0      # Keep all, but score them
+
+  # Valid ranges for nutritional values (per 100g)
+  nutrition_ranges:
+    energy_kcal:
+      min: 0
+      max: 4000              # Theoretical max ~900 kcal/100g for pure fat, but allow margin
+    fat:
+      min: 0
+      max: 100
+    sugars:
+      min: 0
+      max: 100
+    proteins:
+      min: 0
+      max: 100
+    salt:
+      min: 0
+      max: 100
+
+  # Valid categorical values
+  valid_nutriscore_grades: ["a", "b", "c", "d", "e"]
+  valid_nova_groups: [1, 2, 3, 4]
+  valid_ecoscore_grades: ["a", "b", "c", "d", "e"]
+
+  # Minimum products per group for Gold aggregations
+  # Prevents misleading stats from tiny sample sizes
+  min_products_per_category: 50
+  min_products_per_brand: 20
+  min_products_per_country: 100
+
+# ---------------------------------------------------------------------------
+# Partitioning Strategy
+# ---------------------------------------------------------------------------
+partitioning:
+  silver:
+    # Partition Silver by primary_country for efficient country-level queries
+    partition_by: "primary_country"
+  gold:
+    nutrition_by_category:
+      partition_by: null      # Small enough, no partitioning needed
+    brand_scorecard:
+      partition_by: null
+    country_nutriscore:
+      partition_by: null
+
+# ---------------------------------------------------------------------------
+# Pipeline Metadata
+# ---------------------------------------------------------------------------
+pipeline:
+  name: "food-intelligence-pipeline"
+  version: "1.0.0"
+  description: "Medallion architecture processing Open Food Facts (3M+ products, 150+ countries)"
+  author: "Ilija"

@@ -1,0 +1,41 @@
+# Data files — never commit raw data to git
+*.parquet
+*.jsonl
+*.jsonl.gz
+*.csv
+*.tsv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Databricks
+.databricks/
+*.dbc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.env
+credentials.json
+
+# Dashboard screenshots are ok to commit
+# but keep the directory placeholder
+!dashboards/screenshots/.gitkeep
