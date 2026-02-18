@@ -54,7 +54,7 @@ schema = config["schema"]
 silver_table = config["tables"]["silver"]["products"]
 volume = config["volume"]
 
-# Fully qualified table name: main.food_intelligence.silver_products
+# Fully qualified table name: workspace.food_intelligence.silver_products
 silver_fqn = f"{catalog}.{schema}.{silver_table}"
 
 spark.sql(f"USE CATALOG {catalog}")

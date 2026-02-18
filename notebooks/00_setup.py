@@ -192,7 +192,7 @@ display(df_raw.select("code", "product_name", "brands", "categories_tags", "coun
 # MAGIC | Item | Status |
 # MAGIC |------|--------|
 # MAGIC | Configuration | Loaded from YAML |
-# MAGIC | Schema | `main.food_intelligence` created |
+# MAGIC | Schema | `workspace.food_intelligence` created |
 # MAGIC | Volume | `raw_data` created for file storage |
 # MAGIC | Data download | Complete |
 # MAGIC | Validation | Row count and schema verified |

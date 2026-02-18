@@ -279,6 +279,6 @@ print("=" * 70)
 # MAGIC > joins multiple Gold tables — are views with zero storage cost. The `vw_high_quality_products`
 # MAGIC > view is particularly useful: it pre-filters to records with quality score >= 0.7 so analysts
 # MAGIC > don't have to remember the threshold. This maps to the semantic layer concept in DP-600.
-# MAGIC > All views are registered in Unity Catalog under `main.food_intelligence`, giving us
+# MAGIC > All views are registered in Unity Catalog under `workspace.food_intelligence`, giving us
 # MAGIC > centralized governance — access control, lineage tracking, and discoverability in a single
 # MAGIC > three-level namespace."

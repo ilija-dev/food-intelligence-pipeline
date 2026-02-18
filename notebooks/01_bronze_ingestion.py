@@ -312,7 +312,7 @@ print(json.dumps(metadata, indent=2))
 # MAGIC | Columns preserved | {raw_columns} source + 4 metadata |
 # MAGIC | Transformations | ZERO (metadata columns only) |
 # MAGIC | Format | Delta Lake (Unity Catalog managed table) |
-# MAGIC | Table | `main.food_intelligence.bronze_products` |
+# MAGIC | Table | `workspace.food_intelligence.bronze_products` |
 # MAGIC
 # MAGIC **Next step**: Run `02_silver_cleaning.py` to deduplicate, flatten, type-cast, and standardize.
 

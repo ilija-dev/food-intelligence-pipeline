@@ -30,7 +30,7 @@ active_source: "parquet"
 # Unity Catalog: Catalog / Schema / Volume
 # ---------------------------------------------------------------------------
 # On Free Edition, you get a default catalog. We create a schema and volume.
-catalog: "main"
+catalog: "workspace"
 schema: "food_intelligence"
 
 # Volume for raw file storage (replaces DBFS)
