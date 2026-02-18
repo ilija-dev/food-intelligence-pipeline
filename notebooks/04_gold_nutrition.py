@@ -14,8 +14,6 @@
 # MAGIC
 # MAGIC ---
 # MAGIC
-# MAGIC **DP-600 Mapping**: "Create measures and metrics" — business aggregations  
-# MAGIC **DP-700 Mapping**: "Build consumption layer" — Gold table design patterns
 
 # COMMAND ----------
 
