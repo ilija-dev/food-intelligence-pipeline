@@ -41,7 +41,7 @@ try:
 except (NameError, FileNotFoundError):
     # Databricks notebook: __file__ is not defined
     # Update this path to match your Repos location: /Workspace/Repos/<username>/food-intelligence-pipeline/...
-    WORKSPACE_CONFIG = "/Workspace/Repos/food-intelligence-pipeline/config/pipeline_config.yaml"
+    WORKSPACE_CONFIG = "/Workspace/Users/ileristovski1@gmail.com/food-intelligence-pipeline/config/pipeline_config.yaml"
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 

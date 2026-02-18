@@ -43,7 +43,7 @@ try:
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 except (NameError, FileNotFoundError):
-    WORKSPACE_CONFIG = "/Workspace/Repos/food-intelligence-pipeline/config/pipeline_config.yaml"
+    WORKSPACE_CONFIG = "/Workspace/Users/ileristovski1@gmail.com/food-intelligence-pipeline/config/pipeline_config.yaml"
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
