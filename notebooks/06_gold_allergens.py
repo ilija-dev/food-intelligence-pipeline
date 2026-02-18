@@ -45,14 +45,19 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-silver_path = config["delta_tables"]["silver"]["products"]
-gold_paths = config["delta_tables"]["gold"]
+# Unity Catalog identifiers
+catalog = config["catalog"]
+schema = config["schema"]
+silver_table = config["tables"]["silver"]["products"]
+gold_tables = config["tables"]["gold"]
 min_per_category = config["quality"]["min_products_per_category"]
 
-spark.sql(f"USE {db_name}")
+# Set default catalog and schema context
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
 
-df_silver = spark.read.format("delta").load(silver_path)
+# Read Silver as a Unity Catalog managed table
+df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 print(f"Silver input: {df_silver.count():,} rows")
 
 # COMMAND ----------
@@ -162,17 +167,16 @@ df_allergen_prevalence = (
 prevalence_count = df_allergen_prevalence.count()
 print(f"Allergen-category combinations: {prevalence_count:,}")
 
-# Write to Delta
-df_allergen_prevalence.write.format("delta").mode("overwrite").option(
-    "overwriteSchema", "true"
-).save(gold_paths["allergen_prevalence"])
+# Write to Unity Catalog as a managed table
+prevalence_table = gold_tables["allergen_prevalence"]
+(
+    df_allergen_prevalence.write
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(f"{catalog}.{schema}.{prevalence_table}")
+)
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_allergen_prevalence
-    USING DELTA LOCATION '{gold_paths["allergen_prevalence"]}'
-""")
-
-print(f"Written: {db_name}.gold_allergen_prevalence")
+print(f"Written: {catalog}.{schema}.{prevalence_table}")
 
 # Show: what allergens dominate in common categories?
 display(
@@ -256,17 +260,16 @@ df_allergen_free = df_allergen_free.orderBy("primary_category", "allergen")
 free_count = df_allergen_free.count()
 print(f"Category-allergen free-from combinations: {free_count:,}")
 
-# Write to Delta
-df_allergen_free.write.format("delta").mode("overwrite").option(
-    "overwriteSchema", "true"
-).save(gold_paths["allergen_free_options"])
+# Write to Unity Catalog as a managed table
+free_table = gold_tables["allergen_free_options"]
+(
+    df_allergen_free.write
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(f"{catalog}.{schema}.{free_table}")
+)
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_allergen_free_options
-    USING DELTA LOCATION '{gold_paths["allergen_free_options"]}'
-""")
-
-print(f"Written: {db_name}.gold_allergen_free_options")
+print(f"Written: {catalog}.{schema}.{free_table}")
 
 # Show: which categories have the most gluten-free options?
 print("\nCategories with highest % gluten-free products:")
@@ -288,8 +291,8 @@ print("=" * 70)
 print("GOLD ALLERGEN ANALYSIS SUMMARY")
 print("=" * 70)
 print(f"Unique allergens found:            {unique_allergens:>6}")
-print(f"gold_allergen_prevalence:          {prevalence_count:>6} category-allergen pairs")
-print(f"gold_allergen_free_options:        {free_count:>6} category-allergen pairs")
+print(f"{prevalence_table}:  {prevalence_count:>6} category-allergen pairs")
+print(f"{free_table}:  {free_count:>6} category-allergen pairs")
 print(f"Major allergens tracked:           {len(major_allergens):>6}")
 print("=" * 70)
 

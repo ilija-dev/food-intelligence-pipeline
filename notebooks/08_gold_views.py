@@ -44,8 +44,15 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-spark.sql(f"USE {db_name}")
+# Unity Catalog: three-level namespace (catalog.schema.table)
+catalog = config["catalog"]
+schema = config["schema"]
+full_schema = f"{catalog}.{schema}"
+
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
+
+print(f"Using Unity Catalog namespace: {full_schema}")
 
 # COMMAND ----------
 
@@ -59,16 +66,16 @@ spark.sql(f"USE {db_name}")
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE VIEW {db_name}.vw_high_quality_products AS
+    CREATE OR REPLACE VIEW {full_schema}.vw_high_quality_products AS
     SELECT *
-    FROM {db_name}.silver_products
+    FROM {full_schema}.silver_products
     WHERE data_quality_score >= 0.7
       AND nutrition_completeness >= 0.5
       AND primary_category IS NOT NULL
       AND primary_country IS NOT NULL
 """)
 
-hq_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.vw_high_quality_products").collect()[0]["cnt"]
+hq_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_high_quality_products").collect()[0]["cnt"]
 print(f"vw_high_quality_products: {hq_count:,} rows (data_quality >= 0.7, nutrition >= 50%)")
 
 # COMMAND ----------
@@ -82,7 +89,7 @@ print(f"vw_high_quality_products: {hq_count:,} rows (data_quality >= 0.7, nutrit
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE VIEW {db_name}.vw_product_search AS
+    CREATE OR REPLACE VIEW {full_schema}.vw_product_search AS
     SELECT
         code,
         product_name,
@@ -98,12 +105,12 @@ spark.sql(f"""
         fiber_100g,
         is_ultra_processed,
         data_quality_score
-    FROM {db_name}.silver_products
+    FROM {full_schema}.silver_products
     WHERE product_name IS NOT NULL
       AND code IS NOT NULL
 """)
 
-search_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.vw_product_search").collect()[0]["cnt"]
+search_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_product_search").collect()[0]["cnt"]
 print(f"vw_product_search: {search_count:,} rows")
 
 # COMMAND ----------
@@ -117,7 +124,7 @@ print(f"vw_product_search: {search_count:,} rows")
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE VIEW {db_name}.vw_country_health_overview AS
+    CREATE OR REPLACE VIEW {full_schema}.vw_country_health_overview AS
     SELECT
         u.primary_country,
         u.total_products,
@@ -129,24 +136,24 @@ spark.sql(f"""
         ns_a.pct_a,
         ns_e.pct_e
 
-    FROM {db_name}.gold_ultra_processing_by_country u
+    FROM {full_schema}.gold_ultra_processing_by_country u
 
     LEFT JOIN (
         SELECT primary_country, pct_of_country AS pct_a
-        FROM {db_name}.gold_country_nutriscore
+        FROM {full_schema}.gold_country_nutriscore
         WHERE nutriscore_grade = 'a'
     ) ns_a ON u.primary_country = ns_a.primary_country
 
     LEFT JOIN (
         SELECT primary_country, pct_of_country AS pct_e
-        FROM {db_name}.gold_country_nutriscore
+        FROM {full_schema}.gold_country_nutriscore
         WHERE nutriscore_grade = 'e'
     ) ns_e ON u.primary_country = ns_e.primary_country
 
     ORDER BY u.total_products DESC
 """)
 
-overview_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.vw_country_health_overview").collect()[0]["cnt"]
+overview_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_country_health_overview").collect()[0]["cnt"]
 print(f"vw_country_health_overview: {overview_count:,} countries")
 
 # COMMAND ----------
@@ -160,7 +167,7 @@ print(f"vw_country_health_overview: {overview_count:,} countries")
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE VIEW {db_name}.vw_category_nutrition AS
+    CREATE OR REPLACE VIEW {full_schema}.vw_category_nutrition AS
     SELECT
         primary_category,
         product_count,
@@ -193,11 +200,11 @@ spark.sql(f"""
         avg_nutrition_completeness,
         overall_health_rank
 
-    FROM {db_name}.gold_category_comparison
+    FROM {full_schema}.gold_category_comparison
     ORDER BY overall_health_rank
 """)
 
-cat_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.vw_category_nutrition").collect()[0]["cnt"]
+cat_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_category_nutrition").collect()[0]["cnt"]
 print(f"vw_category_nutrition: {cat_view_count:,} categories with interpretive labels")
 
 # COMMAND ----------
@@ -210,7 +217,7 @@ print(f"vw_category_nutrition: {cat_view_count:,} categories with interpretive l
 # COMMAND ----------
 
 spark.sql(f"""
-    CREATE OR REPLACE VIEW {db_name}.vw_brand_leaderboard AS
+    CREATE OR REPLACE VIEW {full_schema}.vw_brand_leaderboard AS
     SELECT
         brands,
         product_count,
@@ -227,12 +234,12 @@ spark.sql(f"""
         -- Rank brands by health score (lower nutriscore_numeric = healthier)
         DENSE_RANK() OVER (ORDER BY avg_nutriscore_numeric ASC) AS health_rank
 
-    FROM {db_name}.gold_brand_scorecard
+    FROM {full_schema}.gold_brand_scorecard
     WHERE avg_nutriscore_numeric IS NOT NULL
     ORDER BY health_rank
 """)
 
-brand_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.vw_brand_leaderboard").collect()[0]["cnt"]
+brand_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_brand_leaderboard").collect()[0]["cnt"]
 print(f"vw_brand_leaderboard: {brand_view_count:,} brands ranked by health score")
 
 # COMMAND ----------
@@ -255,7 +262,7 @@ views = [
 ]
 
 for view_name, description in views:
-    cnt = spark.sql(f"SELECT COUNT(*) as cnt FROM {db_name}.{view_name}").collect()[0]["cnt"]
+    cnt = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.{view_name}").collect()[0]["cnt"]
     print(f"  {view_name:<35} {cnt:>8,} rows  | {description}")
 
 print("=" * 70)
@@ -271,4 +278,7 @@ print("=" * 70)
 # MAGIC > for fast reads. Ad-hoc or composable queries — like the country health overview that
 # MAGIC > joins multiple Gold tables — are views with zero storage cost. The `vw_high_quality_products`
 # MAGIC > view is particularly useful: it pre-filters to records with quality score >= 0.7 so analysts
-# MAGIC > don't have to remember the threshold. This maps to the semantic layer concept in DP-600."
+# MAGIC > don't have to remember the threshold. This maps to the semantic layer concept in DP-600.
+# MAGIC > All views are registered in Unity Catalog under `main.food_intelligence`, giving us
+# MAGIC > centralized governance — access control, lineage tracking, and discoverability in a single
+# MAGIC > three-level namespace."

@@ -2,7 +2,7 @@
 # Food Intelligence Pipeline Configuration
 # =============================================================================
 # Single source of truth for all notebooks. Change paths here, not in code.
-# Platform: Databricks Free Edition (Community)
+# Platform: Databricks Free Edition (serverless, Unity Catalog)
 
 # ---------------------------------------------------------------------------
 # Data Sources
@@ -12,14 +12,12 @@ data_sources:
   # ~1.2GB, pre-filtered columns, fastest to get started
   parquet:
     url: "https://huggingface.co/datasets/openfoodfacts/product-database/resolve/main/food.parquet"
-    dbfs_path: "/FileStore/food-intelligence/raw/food.parquet"
     format: "parquet"
 
   # Option B: Full JSONL dump (production / impressive for interviews)
   # ~7GB compressed, 43GB decompressed, 200+ columns, 3M+ products
   jsonl:
     url: "https://static.openfoodfacts.org/data/openfoodfacts-products.jsonl.gz"
-    dbfs_path: "/FileStore/food-intelligence/raw/openfoodfacts-products.jsonl.gz"
     format: "jsonl"
 
   # Field reference documentation
@@ -29,30 +27,33 @@ data_sources:
 active_source: "parquet"
 
 # ---------------------------------------------------------------------------
-# Database / Schema
+# Unity Catalog: Catalog / Schema / Volume
 # ---------------------------------------------------------------------------
-database:
-  name: "food_intelligence"
-  # Catalog is only used if Unity Catalog is enabled (not on Community Edition)
-  catalog: "hive_metastore"
+# On Free Edition, you get a default catalog. We create a schema and volume.
+catalog: "main"
+schema: "food_intelligence"
+
+# Volume for raw file storage (replaces DBFS)
+volume: "raw_data"
+# Full volume path: /Volumes/main/food_intelligence/raw_data/
 
 # ---------------------------------------------------------------------------
-# Delta Table Paths (DBFS)
+# Table Names (Unity Catalog managed tables — no explicit paths needed)
 # ---------------------------------------------------------------------------
-delta_tables:
+tables:
   bronze:
-    products: "/FileStore/food-intelligence/delta/bronze/products"
+    products: "bronze_products"
   silver:
-    products: "/FileStore/food-intelligence/delta/silver/products"
+    products: "silver_products"
   gold:
-    nutrition_by_category: "/FileStore/food-intelligence/delta/gold/nutrition_by_category"
-    brand_scorecard: "/FileStore/food-intelligence/delta/gold/brand_scorecard"
-    category_comparison: "/FileStore/food-intelligence/delta/gold/category_comparison"
-    country_nutriscore: "/FileStore/food-intelligence/delta/gold/country_nutriscore"
-    ultra_processing_by_country: "/FileStore/food-intelligence/delta/gold/ultra_processing_by_country"
-    nutriscore_vs_nova: "/FileStore/food-intelligence/delta/gold/nutriscore_vs_nova"
-    allergen_prevalence: "/FileStore/food-intelligence/delta/gold/allergen_prevalence"
-    allergen_free_options: "/FileStore/food-intelligence/delta/gold/allergen_free_options"
+    nutrition_by_category: "gold_nutrition_by_category"
+    brand_scorecard: "gold_brand_scorecard"
+    category_comparison: "gold_category_comparison"
+    country_nutriscore: "gold_country_nutriscore"
+    ultra_processing_by_country: "gold_ultra_processing_by_country"
+    nutriscore_vs_nova: "gold_nutriscore_vs_nova"
+    allergen_prevalence: "gold_allergen_prevalence"
+    allergen_free_options: "gold_allergen_free_options"
 
 # ---------------------------------------------------------------------------
 # Silver Layer: Column Selection
@@ -162,6 +163,6 @@ partitioning:
 # ---------------------------------------------------------------------------
 pipeline:
   name: "food-intelligence-pipeline"
-  version: "1.0.0"
+  version: "1.1.0"
   description: "Medallion architecture processing Open Food Facts (3M+ products, 150+ countries)"
   author: "Ilija"

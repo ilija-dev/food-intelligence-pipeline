@@ -57,15 +57,22 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-bronze_path = config["delta_tables"]["bronze"]["products"]
-silver_path = config["delta_tables"]["silver"]["products"]
+# Unity Catalog references — managed tables, no DBFS paths
+catalog = config["catalog"]
+schema = config["schema"]
+volume = config["volume"]
+bronze_table = config["tables"]["bronze"]["products"]
+silver_table = config["tables"]["silver"]["products"]
 quality = config["quality"]
 
-spark.sql(f"USE {db_name}")
+bronze_fqn = f"{catalog}.{schema}.{bronze_table}"
+silver_fqn = f"{catalog}.{schema}.{silver_table}"
 
-print(f"Bronze source: {bronze_path}")
-print(f"Silver target: {silver_path}")
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
+
+print(f"Bronze source: {bronze_fqn}")
+print(f"Silver target: {silver_fqn}")
 
 # COMMAND ----------
 
@@ -77,7 +84,7 @@ print(f"Silver target: {silver_path}")
 
 # COMMAND ----------
 
-df_bronze = spark.read.format("delta").load(bronze_path)
+df_bronze = spark.table(bronze_fqn)
 bronze_count = df_bronze.count()
 bronze_cols = len(df_bronze.columns)
 
@@ -561,6 +568,8 @@ print(f"Silver row count: {silver_count:,}")
 # MAGIC - We **partition by `primary_country`** — most Gold queries filter by country,
 # MAGIC   so partitioning means Spark only scans relevant files (partition pruning).
 # MAGIC - Schema is now clean and enforced — no more surprise types.
+# MAGIC - We use Unity Catalog **managed tables** — no explicit DBFS paths. The catalog
+# MAGIC   manages storage, metadata, and access control in one place.
 
 # COMMAND ----------
 
@@ -568,7 +577,6 @@ partition_col = config["partitioning"]["silver"]["partition_by"]
 
 writer = (
     df_clean.write
-    .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
 )
@@ -578,35 +586,17 @@ if partition_col and partition_col in df_clean.columns:
     writer = writer.partitionBy(partition_col)
     print(f"Partitioning Silver by: {partition_col}")
 
-writer.save(silver_path)
-print(f"Silver table written to: {silver_path}")
+writer.saveAsTable(silver_fqn)
+print(f"Silver table written: {silver_fqn}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 12. Register in Metastore
+# MAGIC ## 12. Validation & Summary Stats
 
 # COMMAND ----------
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.silver_products
-    USING DELTA
-    LOCATION '{silver_path}'
-""")
-
-# If the table already existed, refresh it to pick up the new data
-spark.sql(f"REFRESH TABLE {db_name}.silver_products")
-
-print(f"Table registered: {db_name}.silver_products")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 13. Validation & Summary Stats
-
-# COMMAND ----------
-
-df_silver = spark.read.format("delta").load(silver_path)
+df_silver = spark.table(silver_fqn)
 final_count = df_silver.count()
 final_cols = len(df_silver.columns)
 
@@ -636,7 +626,7 @@ print("=" * 70)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 14. Column-level Quality Report
+# MAGIC ## 13. Column-level Quality Report
 
 # COMMAND ----------
 
@@ -653,7 +643,7 @@ for field in df_silver.schema.fields:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 15. Save Silver Metadata
+# MAGIC ## 14. Save Silver Metadata
 
 # COMMAND ----------
 
@@ -667,14 +657,18 @@ silver_metadata = {
     "duplicate_barcodes_remaining": dupe_check,
     "partition_column": partition_col,
     "cleaning_timestamp": datetime.now(timezone.utc).isoformat(),
-    "delta_path": silver_path,
-    "table_name": f"{db_name}.silver_products",
+    "table_name": silver_fqn,
 }
 
-metadata_path = "/FileStore/food-intelligence/metadata/silver_cleaning_metadata.json"
-dbutils.fs.put(metadata_path, json.dumps(silver_metadata, indent=2), overwrite=True)
+# Write metadata to a Unity Catalog Volume (replaces dbutils.fs.put to DBFS)
+metadata_dir = f"/Volumes/{catalog}/{schema}/{volume}/metadata"
+os.makedirs(metadata_dir, exist_ok=True)
 
-print(f"Silver metadata saved to: {metadata_path}")
+metadata_file = os.path.join(metadata_dir, "silver_cleaning_metadata.json")
+with open(metadata_file, "w") as f:
+    json.dump(silver_metadata, f, indent=2)
+
+print(f"Silver metadata saved to: {metadata_file}")
 print(json.dumps(silver_metadata, indent=2))
 
 # COMMAND ----------

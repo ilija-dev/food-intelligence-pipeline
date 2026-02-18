@@ -44,15 +44,18 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-silver_path = config["delta_tables"]["silver"]["products"]
-gold_paths = config["delta_tables"]["gold"]
+# Unity Catalog references
+catalog = config["catalog"]
+schema = config["schema"]
+silver_table = config["tables"]["silver"]["products"]
+gold_tables = config["tables"]["gold"]
 quality = config["quality"]
 
 min_per_category = quality["min_products_per_category"]  # 50
 min_per_brand = quality["min_products_per_brand"]          # 20
 
-spark.sql(f"USE {db_name}")
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
 
 # COMMAND ----------
 
@@ -61,7 +64,8 @@ spark.sql(f"USE {db_name}")
 
 # COMMAND ----------
 
-df_silver = spark.read.format("delta").load(silver_path)
+# Read from Unity Catalog managed table instead of DBFS path
+df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 silver_count = df_silver.count()
 print(f"Silver input: {silver_count:,} rows")
 
@@ -116,17 +120,12 @@ df_nutrition_by_cat = (
 cat_count = df_nutrition_by_cat.count()
 print(f"Categories with >= {min_per_category} products: {cat_count}")
 
-# Write to Delta
-df_nutrition_by_cat.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+df_nutrition_by_cat.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["nutrition_by_category"])
+).saveAsTable(f"{catalog}.{schema}.{gold_tables['nutrition_by_category']}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_nutrition_by_category
-    USING DELTA LOCATION '{gold_paths["nutrition_by_category"]}'
-""")
-
-print(f"Written: {db_name}.gold_nutrition_by_category ({cat_count} categories)")
+print(f"Written: {catalog}.{schema}.{gold_tables['nutrition_by_category']} ({cat_count} categories)")
 
 # Preview top categories
 display(df_nutrition_by_cat.limit(15))
@@ -210,17 +209,12 @@ df_brand_scorecard = (
 brand_count = df_brand_scorecard.count()
 print(f"Brands with >= {min_per_brand} products: {brand_count}")
 
-# Write to Delta
-df_brand_scorecard.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+df_brand_scorecard.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["brand_scorecard"])
+).saveAsTable(f"{catalog}.{schema}.{gold_tables['brand_scorecard']}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_brand_scorecard
-    USING DELTA LOCATION '{gold_paths["brand_scorecard"]}'
-""")
-
-print(f"Written: {db_name}.gold_brand_scorecard ({brand_count} brands)")
+print(f"Written: {catalog}.{schema}.{gold_tables['brand_scorecard']} ({brand_count} brands)")
 
 # Preview top brands by product count
 display(df_brand_scorecard.limit(15))
@@ -285,17 +279,12 @@ df_comparison = (
 
 comparison_count = df_comparison.count()
 
-# Write to Delta
-df_comparison.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+df_comparison.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["category_comparison"])
+).saveAsTable(f"{catalog}.{schema}.{gold_tables['category_comparison']}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_category_comparison
-    USING DELTA LOCATION '{gold_paths["category_comparison"]}'
-""")
-
-print(f"Written: {db_name}.gold_category_comparison ({comparison_count} categories)")
+print(f"Written: {catalog}.{schema}.{gold_tables['category_comparison']} ({comparison_count} categories)")
 
 # Show healthiest categories
 print("\nTop 15 healthiest categories (by composite rank):")
@@ -321,9 +310,10 @@ display(
 print("=" * 70)
 print("GOLD NUTRITION ANALYTICS SUMMARY")
 print("=" * 70)
-print(f"gold_nutrition_by_category:  {cat_count:>6} categories (min {min_per_category} products)")
-print(f"gold_brand_scorecard:        {brand_count:>6} brands (min {min_per_brand} products)")
-print(f"gold_category_comparison:    {comparison_count:>6} categories with health ranks")
+print(f"  {gold_tables['nutrition_by_category']}:  {cat_count:>6} categories (min {min_per_category} products)")
+print(f"  {gold_tables['brand_scorecard']}:        {brand_count:>6} brands (min {min_per_brand} products)")
+print(f"  {gold_tables['category_comparison']}:    {comparison_count:>6} categories with health ranks")
+print(f"  Catalog: {catalog} | Schema: {schema}")
 print("=" * 70)
 
 # COMMAND ----------
@@ -337,4 +327,7 @@ print("=" * 70)
 # MAGIC > `brand_scorecard` lets competitive analysts compare brands on health metrics — I convert
 # MAGIC > Nutri-Score letters to numeric, average them, and convert back, so a brand that's mostly
 # MAGIC > A's and B's gets a meaningful 'b' grade, not a useless 'a,b,a,c' string. All Gold tables
-# MAGIC > enforce minimum sample sizes from config to prevent misleading stats from tiny categories."
+# MAGIC > enforce minimum sample sizes from config to prevent misleading stats from tiny categories.
+# MAGIC > Everything is registered as Unity Catalog managed tables — no DBFS paths to manage,
+# MAGIC > governance and lineage come for free, and any downstream consumer can discover these
+# MAGIC > tables through the catalog without needing to know storage locations."

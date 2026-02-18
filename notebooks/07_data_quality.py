@@ -47,13 +47,18 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-bronze_path = config["delta_tables"]["bronze"]["products"]
-silver_path = config["delta_tables"]["silver"]["products"]
-gold_paths = config["delta_tables"]["gold"]
+# Unity Catalog references
+catalog = config["catalog"]
+schema = config["schema"]
+volume = config["volume"]
+
+bronze_table = f"{catalog}.{schema}.{config['tables']['bronze']['products']}"
+silver_table = f"{catalog}.{schema}.{config['tables']['silver']['products']}"
+gold_tables = config["tables"]["gold"]  # dict: key -> table name string
 quality = config["quality"]
 
-spark.sql(f"USE {db_name}")
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
 
 # Track all check results
 results = []
@@ -82,7 +87,7 @@ print("=" * 60)
 print("BRONZE LAYER CHECKS")
 print("=" * 60)
 
-df_bronze = spark.read.format("delta").load(bronze_path)
+df_bronze = spark.table(bronze_table)
 bronze_count = df_bronze.count()
 
 # B1: Row count non-zero
@@ -127,6 +132,14 @@ if "_ingestion_timestamp" in bronze_cols:
     else:
         check("B4: Bronze data freshness", False, "Null timestamp")
 
+# B5: Delta history — verify table has transaction log entries
+bronze_history = spark.sql(f"DESCRIBE HISTORY {bronze_table}").count()
+check(
+    "B5: Bronze Delta history exists",
+    bronze_history > 0,
+    f"{bronze_history} transaction(s) logged",
+)
+
 print()
 
 # COMMAND ----------
@@ -147,7 +160,7 @@ print("=" * 60)
 print("SILVER LAYER CHECKS")
 print("=" * 60)
 
-df_silver = spark.read.format("delta").load(silver_path)
+df_silver = spark.table(silver_table)
 silver_count = df_silver.count()
 
 # S1: Silver has fewer or equal rows than Bronze (dedup removes, doesn't add)
@@ -271,6 +284,14 @@ if "data_quality_score" in df_silver.columns:
         f"Out of range: {out_of_range:,}",
     )
 
+# S10: Delta history — verify Silver table has been written to
+silver_history = spark.sql(f"DESCRIBE HISTORY {silver_table}").count()
+check(
+    "S10: Silver Delta history exists",
+    silver_history > 0,
+    f"{silver_history} transaction(s) logged",
+)
+
 print()
 
 # COMMAND ----------
@@ -288,21 +309,11 @@ print("=" * 60)
 print("GOLD LAYER CHECKS")
 print("=" * 60)
 
-# G1: All Gold tables have data
-gold_table_checks = {
-    "gold_nutrition_by_category": gold_paths["nutrition_by_category"],
-    "gold_brand_scorecard": gold_paths["brand_scorecard"],
-    "gold_category_comparison": gold_paths["category_comparison"],
-    "gold_country_nutriscore": gold_paths["country_nutriscore"],
-    "gold_ultra_processing_by_country": gold_paths["ultra_processing_by_country"],
-    "gold_nutriscore_vs_nova": gold_paths["nutriscore_vs_nova"],
-    "gold_allergen_prevalence": gold_paths["allergen_prevalence"],
-    "gold_allergen_free_options": gold_paths["allergen_free_options"],
-}
-
-for table_name, path in gold_table_checks.items():
+# G1: All Gold tables have data — iterate config dict
+for key, table_name in gold_tables.items():
+    fqn = f"{catalog}.{schema}.{table_name}"
     try:
-        cnt = spark.read.format("delta").load(path).count()
+        cnt = spark.table(fqn).count()
         check(
             f"G1: {table_name} has data",
             cnt > 0,
@@ -312,8 +323,9 @@ for table_name, path in gold_table_checks.items():
         check(f"G1: {table_name} exists", False, str(e)[:100])
 
 # G2: Minimum product thresholds enforced in nutrition_by_category
+nutrition_fqn = f"{catalog}.{schema}.{gold_tables['nutrition_by_category']}"
 try:
-    df_nutrition = spark.read.format("delta").load(gold_paths["nutrition_by_category"])
+    df_nutrition = spark.table(nutrition_fqn)
     min_cat = quality["min_products_per_category"]
     below_threshold = df_nutrition.filter(F.col("product_count") < min_cat).count()
     check(
@@ -325,8 +337,9 @@ except Exception:
     check("G2: Nutrition by category threshold", False, "Table not readable")
 
 # G3: Brand scorecard minimum threshold
+brand_fqn = f"{catalog}.{schema}.{gold_tables['brand_scorecard']}"
 try:
-    df_brands = spark.read.format("delta").load(gold_paths["brand_scorecard"])
+    df_brands = spark.table(brand_fqn)
     min_brand = quality["min_products_per_brand"]
     below_threshold = df_brands.filter(F.col("product_count") < min_brand).count()
     check(
@@ -339,8 +352,9 @@ except Exception:
 
 # G4: Nutri-Score vs NOVA cross-tab completeness
 # Should have entries for all 5 grades x 4 NOVA groups = up to 20 cells
+cross_fqn = f"{catalog}.{schema}.{gold_tables['nutriscore_vs_nova']}"
 try:
-    df_cross = spark.read.format("delta").load(gold_paths["nutriscore_vs_nova"])
+    df_cross = spark.table(cross_fqn)
     cell_count = df_cross.count()
     check(
         "G4: Nutri-Score vs NOVA has reasonable coverage",
@@ -352,7 +366,7 @@ except Exception:
 
 # G5: KPI sanity — avg calories should be reasonable (not 0, not 5000)
 try:
-    df_nutrition = spark.read.format("delta").load(gold_paths["nutrition_by_category"])
+    df_nutrition = spark.table(nutrition_fqn)
     avg_cal_stats = df_nutrition.agg(
         F.min("avg_energy_kcal").alias("min_avg"),
         F.max("avg_energy_kcal").alias("max_avg"),
@@ -369,8 +383,9 @@ except Exception:
     check("G5: KPI sanity - calories", False, "Could not compute")
 
 # G6: Country percentages sum to ~100% per country in nutriscore distribution
+country_ns_fqn = f"{catalog}.{schema}.{gold_tables['country_nutriscore']}"
 try:
-    df_ns = spark.read.format("delta").load(gold_paths["country_nutriscore"])
+    df_ns = spark.table(country_ns_fqn)
     country_sums = (
         df_ns
         .groupBy("primary_country")
@@ -411,8 +426,7 @@ check(
 # X2: Gold categories are a subset of Silver categories
 try:
     gold_cats = set(
-        spark.read.format("delta")
-        .load(gold_paths["nutrition_by_category"])
+        spark.table(nutrition_fqn)
         .select("primary_category")
         .distinct()
         .rdd.flatMap(lambda x: x)
@@ -478,8 +492,14 @@ report = {
     "checks": results,
 }
 
-report_path = "/FileStore/food-intelligence/metadata/quality_report.json"
-dbutils.fs.put(report_path, json.dumps(report, indent=2), overwrite=True)
+# Write report to Unity Catalog Volume
+report_dir = f"/Volumes/{catalog}/{schema}/{volume}/metadata"
+os.makedirs(report_dir, exist_ok=True)
+report_path = os.path.join(report_dir, "quality_report.json")
+
+with open(report_path, "w") as f:
+    json.dump(report, f, indent=2)
+
 print(f"Quality report saved to: {report_path}")
 
 # COMMAND ----------

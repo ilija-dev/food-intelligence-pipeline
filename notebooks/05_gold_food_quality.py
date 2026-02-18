@@ -45,14 +45,19 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-silver_path = config["delta_tables"]["silver"]["products"]
-gold_paths = config["delta_tables"]["gold"]
+# Unity Catalog references
+catalog = config["catalog"]
+schema = config["schema"]
+silver_table = config["tables"]["silver"]["products"]
+gold_tables = config["tables"]["gold"]
 min_per_country = config["quality"]["min_products_per_country"]  # 100
 
-spark.sql(f"USE {db_name}")
+# Set the active catalog and schema for this notebook
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
 
-df_silver = spark.read.format("delta").load(silver_path)
+# Read Silver as a Unity Catalog managed table
+df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 print(f"Silver input: {df_silver.count():,} rows")
 
 # COMMAND ----------
@@ -100,17 +105,13 @@ df_country_nutriscore = (
 country_ns_count = df_country_nutriscore.select("primary_country").distinct().count()
 print(f"Countries with >= {min_per_country} scored products: {country_ns_count}")
 
-# Write to Delta
-df_country_nutriscore.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+gold_country_ns = gold_tables["country_nutriscore"]
+df_country_nutriscore.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["country_nutriscore"])
+).saveAsTable(f"{catalog}.{schema}.{gold_country_ns}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_country_nutriscore
-    USING DELTA LOCATION '{gold_paths["country_nutriscore"]}'
-""")
-
-print(f"Written: {db_name}.gold_country_nutriscore")
+print(f"Written: {catalog}.{schema}.{gold_country_ns}")
 
 # Preview: top countries, show grade distribution
 display(
@@ -184,17 +185,13 @@ df_ultra_processing = (
 ultra_count = df_ultra_processing.count()
 print(f"Countries with >= {min_per_country} NOVA-classified products: {ultra_count}")
 
-# Write to Delta
-df_ultra_processing.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+gold_ultra = gold_tables["ultra_processing_by_country"]
+df_ultra_processing.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["ultra_processing_by_country"])
+).saveAsTable(f"{catalog}.{schema}.{gold_ultra}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_ultra_processing_by_country
-    USING DELTA LOCATION '{gold_paths["ultra_processing_by_country"]}'
-""")
-
-print(f"Written: {db_name}.gold_ultra_processing_by_country")
+print(f"Written: {catalog}.{schema}.{gold_ultra}")
 display(df_ultra_processing.limit(15))
 
 # COMMAND ----------
@@ -232,17 +229,13 @@ df_nutriscore_vs_nova = (
     .orderBy("nova_group", "nutriscore_grade")
 )
 
-# Write to Delta
-df_nutriscore_vs_nova.write.format("delta").mode("overwrite").option(
+# Write as Unity Catalog managed table
+gold_ns_nova = gold_tables["nutriscore_vs_nova"]
+df_nutriscore_vs_nova.write.mode("overwrite").option(
     "overwriteSchema", "true"
-).save(gold_paths["nutriscore_vs_nova"])
+).saveAsTable(f"{catalog}.{schema}.{gold_ns_nova}")
 
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.gold_nutriscore_vs_nova
-    USING DELTA LOCATION '{gold_paths["nutriscore_vs_nova"]}'
-""")
-
-print(f"Written: {db_name}.gold_nutriscore_vs_nova")
+print(f"Written: {catalog}.{schema}.{gold_ns_nova}")
 print("\nNutri-Score distribution WITHIN each NOVA group:")
 display(df_nutriscore_vs_nova)
 

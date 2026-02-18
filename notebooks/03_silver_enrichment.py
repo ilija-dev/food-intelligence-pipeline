@@ -48,10 +48,17 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-db_name = config["database"]["name"]
-silver_path = config["delta_tables"]["silver"]["products"]
+# Unity Catalog references
+catalog = config["catalog"]
+schema = config["schema"]
+silver_table = config["tables"]["silver"]["products"]
+volume = config["volume"]
 
-spark.sql(f"USE {db_name}")
+# Fully qualified table name: main.food_intelligence.silver_products
+silver_fqn = f"{catalog}.{schema}.{silver_table}"
+
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE SCHEMA {schema}")
 
 # COMMAND ----------
 
@@ -60,7 +67,7 @@ spark.sql(f"USE {db_name}")
 
 # COMMAND ----------
 
-df_silver = spark.read.format("delta").load(silver_path)
+df_silver = spark.table(silver_fqn)
 silver_count = df_silver.count()
 print(f"Silver input: {silver_count:,} rows x {len(df_silver.columns)} columns")
 
@@ -260,8 +267,8 @@ display(
 # MAGIC %md
 # MAGIC ## 8. Write Enriched Silver Table
 # MAGIC
-# MAGIC We overwrite the Silver table with the enriched version.
-# MAGIC Same partitioning strategy as before.
+# MAGIC We overwrite the Silver managed table with the enriched version.
+# MAGIC Same partitioning strategy as before. Unity Catalog manages the storage location.
 
 # COMMAND ----------
 
@@ -269,7 +276,6 @@ partition_col = config["partitioning"]["silver"]["partition_by"]
 
 writer = (
     df_enriched.write
-    .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
 )
@@ -278,12 +284,8 @@ if partition_col and partition_col in df_enriched.columns:
     writer = writer.partitionBy(partition_col)
     print(f"Partitioning by: {partition_col}")
 
-writer.save(silver_path)
-print(f"Enriched Silver written to: {silver_path}")
-
-# Refresh metastore registration
-spark.sql(f"REFRESH TABLE {db_name}.silver_products")
-print(f"Table refreshed: {db_name}.silver_products")
+writer.saveAsTable(silver_fqn)
+print(f"Enriched Silver written to managed table: {silver_fqn}")
 
 # COMMAND ----------
 
@@ -292,7 +294,7 @@ print(f"Table refreshed: {db_name}.silver_products")
 
 # COMMAND ----------
 
-df_final = spark.read.format("delta").load(silver_path)
+df_final = spark.table(silver_fqn)
 final_count = df_final.count()
 final_cols = len(df_final.columns)
 
@@ -337,14 +339,18 @@ enrichment_metadata = {
     "enrichment_columns_added": enrichment_cols,
     "total_columns": final_cols,
     "enrichment_timestamp": datetime.now(timezone.utc).isoformat(),
-    "delta_path": silver_path,
-    "table_name": f"{db_name}.silver_products",
+    "table_name": silver_fqn,
 }
 
-metadata_path = "/FileStore/food-intelligence/metadata/silver_enrichment_metadata.json"
-dbutils.fs.put(metadata_path, json.dumps(enrichment_metadata, indent=2), overwrite=True)
+# Write metadata to Unity Catalog Volume (replaces dbutils.fs.put on DBFS)
+metadata_dir = f"/Volumes/{catalog}/{schema}/{volume}/metadata"
+os.makedirs(metadata_dir, exist_ok=True)
 
-print(f"Enrichment metadata saved to: {metadata_path}")
+metadata_file = os.path.join(metadata_dir, "silver_enrichment_metadata.json")
+with open(metadata_file, "w") as f:
+    json.dump(enrichment_metadata, f, indent=2)
+
+print(f"Enrichment metadata saved to: {metadata_file}")
 
 # COMMAND ----------
 

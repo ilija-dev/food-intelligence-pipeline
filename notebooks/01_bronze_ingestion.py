@@ -41,16 +41,24 @@ except (NameError, FileNotFoundError):
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
 
-# Extract what we need
+# Extract what we need — Unity Catalog coordinates
+catalog = config["catalog"]
+schema = config["schema"]
+volume = config["volume"]
 active_source = config["active_source"]
 source_config = config["data_sources"][active_source]
-db_name = config["database"]["name"]
-bronze_path = config["delta_tables"]["bronze"]["products"]
+bronze_table = config["tables"]["bronze"]["products"]
+full_table_name = f"{catalog}.{schema}.{bronze_table}"
+
+# Volume path for source files (accessible as regular filesystem path)
+volume_path = f"/Volumes/{catalog}/{schema}/{volume}"
+source_filename = source_config["url"].split("/")[-1]
+source_path = f"{volume_path}/{source_filename}"
 
 print(f"Source: {active_source} ({source_config['format']})")
-print(f"Source path: {source_config['dbfs_path']}")
-print(f"Bronze Delta path: {bronze_path}")
-print(f"Database: {db_name}")
+print(f"Source path: {source_path}")
+print(f"Bronze table: {full_table_name}")
+print(f"Volume: {volume_path}")
 
 # COMMAND ----------
 
@@ -67,9 +75,6 @@ print(f"Database: {db_name}")
 
 # COMMAND ----------
 
-spark.sql(f"USE {db_name}")
-
-source_path = source_config["dbfs_path"]
 source_format = source_config["format"]
 
 if source_format == "parquet":
@@ -123,9 +128,9 @@ print(f"Batch ID: {batch_id}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Write to Delta Lake
+# MAGIC ## 4. Write to Delta Lake (Unity Catalog Managed Table)
 # MAGIC
-# MAGIC We write as Delta format with `overwrite` mode. Key decisions:
+# MAGIC We write as a Unity Catalog managed table with `overwrite` mode. Key decisions:
 # MAGIC
 # MAGIC - **`mode("overwrite")`**: This is a full-refresh ingestion. Each run replaces the Bronze table
 # MAGIC   entirely. For incremental ingestion (new products only), you'd use `merge` — but Open Food
@@ -138,6 +143,9 @@ print(f"Batch ID: {batch_id}")
 # MAGIC - **No partitioning in Bronze**: We don't know how the data will be queried yet.
 # MAGIC   Partitioning is a Silver/Gold decision based on access patterns.
 # MAGIC
+# MAGIC - **Managed table via `saveAsTable`**: Unity Catalog manages the storage location.
+# MAGIC   No DBFS paths needed — the catalog handles data governance, lineage, and access control.
+# MAGIC
 # MAGIC - **Delta Lake instead of raw Parquet**: Gives us ACID transactions (write doesn't corrupt
 # MAGIC   on failure), time travel (compare with previous ingestion), and schema enforcement.
 
@@ -145,45 +153,25 @@ print(f"Batch ID: {batch_id}")
 
 (
     df_bronze.write
-    .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
-    .save(bronze_path)
+    .saveAsTable(full_table_name)
 )
 
-print(f"Bronze table written to: {bronze_path}")
+print(f"Bronze table written: {full_table_name}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Register in Metastore
-# MAGIC
-# MAGIC Writing Delta files to DBFS creates the physical data. Registering as a table in the
-# MAGIC metastore makes it queryable via SQL (`SELECT * FROM food_intelligence.bronze_products`).
-# MAGIC This is the difference between "files on disk" and "a table in a database."
-
-# COMMAND ----------
-
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {db_name}.bronze_products
-    USING DELTA
-    LOCATION '{bronze_path}'
-""")
-
-print(f"Table registered: {db_name}.bronze_products")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Validation
+# MAGIC ## 5. Validation
 # MAGIC
 # MAGIC Post-write checks — never trust that a write succeeded without verifying.
-# MAGIC We read the Delta table back and compare row counts.
+# MAGIC We read the managed table back via `spark.table()` and compare row counts.
 
 # COMMAND ----------
 
-# Read back from Delta and validate
-df_verify = spark.read.format("delta").load(bronze_path)
+# Read back from the managed table and validate
+df_verify = spark.table(full_table_name)
 bronze_count = df_verify.count()
 bronze_columns = len(df_verify.columns)
 
@@ -206,7 +194,7 @@ print("=" * 60)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Schema Overview
+# MAGIC ## 6. Schema Overview
 # MAGIC
 # MAGIC Print the full schema so we can see exactly what we're preserving.
 # MAGIC For JSONL ingestion, this shows the nested `nutriments` struct with 100+ sub-fields.
@@ -236,7 +224,7 @@ if len(data_cols) > 50:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Quick Data Profile
+# MAGIC ## 7. Quick Data Profile
 # MAGIC
 # MAGIC A few quick stats to understand what we're working with before Silver.
 # MAGIC This is NOT transformation — it's reconnaissance.
@@ -262,26 +250,28 @@ for field in existing_fields:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Delta Lake Features Demo
+# MAGIC ## 8. Delta Lake Features Demo
 # MAGIC
 # MAGIC Show that this is Delta, not just Parquet — we have transaction history.
 
 # COMMAND ----------
 
 # Show Delta table history — this proves ACID transactions are working
-display(spark.sql(f"DESCRIBE HISTORY '{bronze_path}' LIMIT 5"))
+display(spark.sql(f"DESCRIBE HISTORY {full_table_name} LIMIT 5"))
 
 # COMMAND ----------
 
 # Show table details
-display(spark.sql(f"DESCRIBE DETAIL '{bronze_path}'"))
+display(spark.sql(f"DESCRIBE DETAIL {full_table_name}"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 10. Save Ingestion Metadata
+# MAGIC ## 9. Save Ingestion Metadata
 # MAGIC
-# MAGIC Update the pipeline metadata file so downstream notebooks know when Bronze was last refreshed.
+# MAGIC Write pipeline metadata to the Unity Catalog volume so downstream notebooks
+# MAGIC know when Bronze was last refreshed. Volume paths are accessible as regular
+# MAGIC filesystem paths — no `dbutils.fs` needed.
 
 # COMMAND ----------
 
@@ -295,14 +285,18 @@ metadata = {
     "source_path": source_path,
     "batch_id": batch_id,
     "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
-    "delta_path": bronze_path,
-    "table_name": f"{db_name}.bronze_products",
+    "table_name": full_table_name,
 }
 
-metadata_path = "/FileStore/food-intelligence/metadata/bronze_metadata.json"
-dbutils.fs.put(metadata_path, json.dumps(metadata, indent=2), overwrite=True)
+# Volume paths are regular filesystem paths — use standard Python I/O
+metadata_dir = f"{volume_path}/metadata"
+os.makedirs(metadata_dir, exist_ok=True)
 
-print(f"Bronze metadata saved to: {metadata_path}")
+metadata_file = f"{metadata_dir}/bronze_metadata.json"
+with open(metadata_file, "w") as f:
+    json.dump(metadata, f, indent=2)
+
+print(f"Bronze metadata saved to: {metadata_file}")
 print(json.dumps(metadata, indent=2))
 
 # COMMAND ----------
@@ -317,8 +311,8 @@ print(json.dumps(metadata, indent=2))
 # MAGIC | Bronze rows | {bronze_count:,} |
 # MAGIC | Columns preserved | {raw_columns} source + 4 metadata |
 # MAGIC | Transformations | ZERO (metadata columns only) |
-# MAGIC | Format | Delta Lake |
-# MAGIC | Table | `food_intelligence.bronze_products` |
+# MAGIC | Format | Delta Lake (Unity Catalog managed table) |
+# MAGIC | Table | `main.food_intelligence.bronze_products` |
 # MAGIC
 # MAGIC **Next step**: Run `02_silver_cleaning.py` to deduplicate, flatten, type-cast, and standardize.
 
@@ -333,5 +327,7 @@ print(json.dumps(metadata, indent=2))
 # MAGIC > from crowd-sourced contributions. I add only four metadata columns for lineage tracking. No
 # MAGIC > transformations happen here. This means if my Silver dedup logic has a bug, or if I need a column
 # MAGIC > I initially excluded, I replay from Bronze without re-downloading the 7GB source dump. I write as
-# MAGIC > Delta with schema evolution enabled because Open Food Facts adds new fields without warning —
-# MAGIC > `overwriteSchema` handles that gracefully instead of failing the pipeline."
+# MAGIC > a Unity Catalog managed table with schema evolution enabled because Open Food Facts adds new fields
+# MAGIC > without warning — `overwriteSchema` handles that gracefully instead of failing the pipeline.
+# MAGIC > Using managed tables means Unity Catalog handles data governance, lineage tracking, and access
+# MAGIC > control automatically — no manual DBFS path management."
