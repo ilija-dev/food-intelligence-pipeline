@@ -30,17 +30,16 @@ from datetime import datetime, timezone
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
 
-# Load config
-CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config",
-    "pipeline_config.yaml",
-)
-
+# Load config — handles both local execution and Databricks notebooks
 try:
+    CONFIG_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config",
+        "pipeline_config.yaml",
+    )
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
-except (FileNotFoundError, NameError):
+except (NameError, FileNotFoundError):
     WORKSPACE_CONFIG = "/Workspace/Repos/food-intelligence-pipeline/config/pipeline_config.yaml"
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)

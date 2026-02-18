@@ -29,21 +29,18 @@
 import yaml
 import os
 
-# On Databricks, the repo is cloned under /Workspace/Repos/<user>/<repo>
-# Adjust this path based on where you cloned the repo
-CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config",
-    "pipeline_config.yaml",
-)
-
-# Fallback for Databricks notebook context where __file__ may not be available
+# Load config — handles both local execution and Databricks notebooks
 try:
+    CONFIG_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config",
+        "pipeline_config.yaml",
+    )
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
-except (FileNotFoundError, NameError):
-    # Running inside a Databricks notebook — use Workspace path
-    # Update this path to match your Databricks Repos location
+except (NameError, FileNotFoundError):
+    # Databricks notebook: __file__ is not defined
+    # Update this path to match your Repos location: /Workspace/Repos/<username>/food-intelligence-pipeline/...
     WORKSPACE_CONFIG = "/Workspace/Repos/food-intelligence-pipeline/config/pipeline_config.yaml"
     with open(WORKSPACE_CONFIG, "r") as f:
         config = yaml.safe_load(f)
