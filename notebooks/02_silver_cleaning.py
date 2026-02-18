@@ -251,13 +251,22 @@ nutrition_ranges = quality["nutrition_ranges"]
 # Track which rows get corrected
 correction_conditions = []
 
-# Energy kcal range check
-energy_min = nutrition_ranges["energy_kcal"]["min"]
-energy_max = nutrition_ranges["energy_kcal"]["max"]
-correction_conditions.append(
-    (F.col("energy_kcal_100g") < energy_min)
-    | (F.col("energy_kcal_100g") > energy_max)
-)
+# Check which nutrition columns actually exist after flattening
+available_nutrition_cols = []
+
+# Initialize energy bounds (will be set if column exists)
+energy_min = None
+energy_max = None
+
+# Energy kcal range check (only if column exists)
+if "energy_kcal_100g" in df_flat.columns:
+    energy_min = nutrition_ranges["energy_kcal"]["min"]
+    energy_max = nutrition_ranges["energy_kcal"]["max"]
+    correction_conditions.append(
+        (F.col("energy_kcal_100g") < energy_min)
+        | (F.col("energy_kcal_100g") > energy_max)
+    )
+    available_nutrition_cols.append("energy_kcal_100g")
 
 # General nutrition range checks (fat, sugars, proteins, salt)
 range_checks = {
@@ -272,38 +281,48 @@ for col_name, bounds in range_checks.items():
         correction_conditions.append(
             (F.col(col_name) < bounds["min"]) | (F.col(col_name) > bounds["max"])
         )
+        available_nutrition_cols.append(col_name)
 
-# Combine all conditions: ANY invalid value triggers the flag
-combined_condition = correction_conditions[0]
-for cond in correction_conditions[1:]:
-    combined_condition = combined_condition | cond
-
-# Add correction flag
-df_validated = df_flat.withColumn(
-    "_nutrition_was_corrected",
-    F.when(combined_condition, F.lit(True)).otherwise(F.lit(False)),
-)
-
-# Now null out the actual invalid values
-df_validated = df_validated.withColumn(
-    "energy_kcal_100g",
-    F.when(
-        (F.col("energy_kcal_100g") >= energy_min)
-        & (F.col("energy_kcal_100g") <= energy_max),
-        F.col("energy_kcal_100g"),
-    ).otherwise(F.lit(None).cast(DoubleType())),
-)
-
-for col_name, bounds in range_checks.items():
-    if col_name in df_validated.columns:
+# Handle case where no nutrition columns exist
+if correction_conditions:
+    # Combine all conditions: ANY invalid value triggers the flag
+    combined_condition = correction_conditions[0]
+    for cond in correction_conditions[1:]:
+        combined_condition = combined_condition | cond
+    
+    # Add correction flag
+    df_validated = df_flat.withColumn(
+        "_nutrition_was_corrected",
+        F.when(combined_condition, F.lit(True)).otherwise(F.lit(False)),
+    )
+    
+    # Now null out the actual invalid values for each available column
+    if "energy_kcal_100g" in df_flat.columns:
         df_validated = df_validated.withColumn(
-            col_name,
+            "energy_kcal_100g",
             F.when(
-                (F.col(col_name) >= bounds["min"])
-                & (F.col(col_name) <= bounds["max"]),
-                F.col(col_name),
+                (F.col("energy_kcal_100g") >= energy_min)
+                & (F.col("energy_kcal_100g") <= energy_max),
+                F.col("energy_kcal_100g"),
             ).otherwise(F.lit(None).cast(DoubleType())),
         )
+    
+    for col_name, bounds in range_checks.items():
+        if col_name in df_validated.columns:
+            df_validated = df_validated.withColumn(
+                col_name,
+                F.when(
+                    (F.col(col_name) >= bounds["min"])
+                    & (F.col(col_name) <= bounds["max"]),
+                    F.col(col_name),
+                ).otherwise(F.lit(None).cast(DoubleType())),
+            )
+    
+    print(f"Nutrition validation applied to: {', '.join(available_nutrition_cols)}")
+else:
+    # No nutrition columns available
+    df_validated = df_flat.withColumn("_nutrition_was_corrected", F.lit(False))
+    print("No nutrition columns found for validation")
 
 # Count corrections
 corrected_count = df_validated.filter(F.col("_nutrition_was_corrected")).count()
