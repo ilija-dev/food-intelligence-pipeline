@@ -152,11 +152,21 @@ df_dedup_prep = df_selected.withColumn(
     F.coalesce(F.col("completeness").cast(DoubleType()), F.lit(0.0)),
 )
 
-# Window: partition by barcode, order by completeness DESC then freshness DESC
-dedup_window = Window.partitionBy("code").orderBy(
-    F.col("_completeness_safe").desc(),
-    F.col("last_modified_datetime").desc_nulls_last(),
-)
+# Check if last_modified_datetime exists (may not be in all source formats)
+has_modified_date = "last_modified_datetime" in df_dedup_prep.columns
+
+# Window: partition by barcode, order by completeness DESC then freshness DESC (if available)
+if has_modified_date:
+    print("Using completeness + last_modified_datetime for dedup ranking")
+    dedup_window = Window.partitionBy("code").orderBy(
+        F.col("_completeness_safe").desc(),
+        F.col("last_modified_datetime").desc_nulls_last(),
+    )
+else:
+    print("last_modified_datetime not found — using completeness only for dedup")
+    dedup_window = Window.partitionBy("code").orderBy(
+        F.col("_completeness_safe").desc(),
+    )
 
 df_ranked = df_dedup_prep.withColumn("_dedup_rank", F.row_number().over(dedup_window))
 
