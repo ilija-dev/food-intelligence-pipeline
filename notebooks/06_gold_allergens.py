@@ -155,20 +155,29 @@ else:
         F.col("allergens_tags").isNotNull() & (F.col("allergens_tags") != "")
     )
 
-# Try to split — if it's already an array, this is a no-op via coalesce logic
-df_exploded = (
-    df_with_allergens
-    .withColumn(
-        "allergen_array",
-        F.when(
-            F.col("allergens_tags").cast(StringType()).contains(","),
-            F.split(F.col("allergens_tags"), ","),
-        ).otherwise(F.array(F.col("allergens_tags").cast(StringType()))),
+# Explode the allergens array directly (it's already an array, no splitting needed)
+if "array" in allergens_type:
+    df_exploded = (
+        df_with_allergens
+        .withColumn("allergen_raw", F.explode(F.col("allergens_tags")))
+        .withColumn("allergen", clean_allergen_tag(F.col("allergen_raw")))
+        .filter(F.col("allergen").isNotNull() & (F.col("allergen") != ""))
     )
-    .withColumn("allergen_raw", F.explode("allergen_array"))
-    .withColumn("allergen", clean_allergen_tag(F.col("allergen_raw")))
-    .filter(F.col("allergen").isNotNull() & (F.col("allergen") != ""))
-)
+else:
+    # Handle string type: split on comma first
+    df_exploded = (
+        df_with_allergens
+        .withColumn(
+            "allergen_array",
+            F.when(
+                F.col("allergens_tags").cast(StringType()).contains(","),
+                F.split(F.col("allergens_tags"), ","),
+            ).otherwise(F.array(F.col("allergens_tags").cast(StringType()))),
+        )
+        .withColumn("allergen_raw", F.explode("allergen_array"))
+        .withColumn("allergen", clean_allergen_tag(F.col("allergen_raw")))
+        .filter(F.col("allergen").isNotNull() & (F.col("allergen") != ""))
+    )
 
 allergen_rows = df_exploded.count()
 unique_allergens = df_exploded.select("allergen").distinct().count() if allergen_rows > 0 else 0
