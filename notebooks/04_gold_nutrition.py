@@ -69,6 +69,9 @@ df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 silver_count = df_silver.count()
 print(f"Silver input: {silver_count:,} rows")
 
+# Get list of available columns for dynamic aggregation
+silver_columns = df_silver.columns
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -83,35 +86,49 @@ print(f"Silver input: {silver_count:,} rows")
 
 # COMMAND ----------
 
+# Build dynamic aggregation list based on available columns
+agg_exprs = [F.count("*").alias("product_count")]
+
+# Core nutrition averages - only add if column exists
+nutrition_cols_avg = [
+    ("energy_kcal_100g", "avg_energy_kcal", 1),
+    ("fat_100g", "avg_fat_g", 1),
+    ("saturated_fat_100g", "avg_saturated_fat_g", 1),
+    ("carbohydrates_100g", "avg_carbohydrates_g", 1),
+    ("sugars_100g", "avg_sugars_g", 1),
+    ("fiber_100g", "avg_fiber_g", 1),
+    ("proteins_100g", "avg_proteins_g", 1),
+    ("salt_100g", "avg_salt_g", 2),
+]
+for col_name, alias, precision in nutrition_cols_avg:
+    if col_name in silver_columns:
+        agg_exprs.append(F.round(F.avg(col_name), precision).alias(alias))
+
+# Standard deviations - only add if corresponding avg column exists
+stddev_cols = [
+    ("energy_kcal_100g", "stddev_energy_kcal"),
+    ("sugars_100g", "stddev_sugars_g"),
+]
+for col_name, alias in stddev_cols:
+    if col_name in silver_columns:
+        agg_exprs.append(F.round(F.stddev(col_name), 1).alias(alias))
+
+# Quality indicators - always include
+agg_exprs.append(F.round(F.avg("nutrition_completeness"), 3).alias("avg_nutrition_completeness"))
+agg_exprs.append(F.round(F.avg("data_quality_score"), 3).alias("avg_data_quality_score"))
+
+# Health score distribution - check nutriscore exists
+if "nutriscore_grade" in silver_columns:
+    agg_exprs.append(
+        F.round(F.avg(F.when(F.col("nutriscore_grade").isNotNull(), 1).otherwise(0)), 3)
+        .alias("pct_with_nutriscore")
+    )
+
 df_nutrition_by_cat = (
     df_silver
     .filter(F.col("primary_category").isNotNull())
     .groupBy("primary_category")
-    .agg(
-        F.count("*").alias("product_count"),
-
-        # Core nutrition averages
-        F.round(F.avg("energy_kcal_100g"), 1).alias("avg_energy_kcal"),
-        F.round(F.avg("fat_100g"), 1).alias("avg_fat_g"),
-        F.round(F.avg("saturated_fat_100g"), 1).alias("avg_saturated_fat_g"),
-        F.round(F.avg("carbohydrates_100g"), 1).alias("avg_carbohydrates_g"),
-        F.round(F.avg("sugars_100g"), 1).alias("avg_sugars_g"),
-        F.round(F.avg("fiber_100g"), 1).alias("avg_fiber_g"),
-        F.round(F.avg("proteins_100g"), 1).alias("avg_proteins_g"),
-        F.round(F.avg("salt_100g"), 2).alias("avg_salt_g"),
-
-        # Standard deviations — high stddev means wide variation within category
-        F.round(F.stddev("energy_kcal_100g"), 1).alias("stddev_energy_kcal"),
-        F.round(F.stddev("sugars_100g"), 1).alias("stddev_sugars_g"),
-
-        # Quality indicators
-        F.round(F.avg("nutrition_completeness"), 3).alias("avg_nutrition_completeness"),
-        F.round(F.avg("data_quality_score"), 3).alias("avg_data_quality_score"),
-
-        # Health score distribution within category
-        F.round(F.avg(F.when(F.col("nutriscore_grade").isNotNull(), 1).otherwise(0)), 3)
-        .alias("pct_with_nutriscore"),
-    )
+    .agg(*agg_exprs)
     # Filter to categories with enough products for meaningful stats
     .filter(F.col("product_count") >= min_per_category)
     .orderBy(F.col("product_count").desc())
@@ -164,47 +181,66 @@ def avg_to_grade(col_name):
         .otherwise("e")
     )
 
-df_brand_scorecard = (
-    df_silver
-    .filter(F.col("brands").isNotNull() & (F.trim(F.col("brands")) != ""))
-    .withColumn("nutriscore_numeric", nutriscore_numeric)
-    .groupBy("brands")
-    .agg(
-        F.count("*").alias("product_count"),
+# Build dynamic aggregation for brand scorecard
+brand_agg_exprs = [F.count("*").alias("product_count")]
 
-        # Health scores
-        F.round(F.avg("nutriscore_numeric"), 2).alias("avg_nutriscore_numeric"),
-        F.round(F.avg(F.col("nova_group").cast(DoubleType())), 2).alias("avg_nova_group"),
+# Health scores - nutriscore if available
+if "nutriscore_grade" in silver_columns:
+    brand_agg_exprs.append(F.round(F.avg("nutriscore_numeric"), 2).alias("avg_nutriscore_numeric"))
 
-        # Nutrition profile
-        F.round(F.avg("energy_kcal_100g"), 1).alias("avg_energy_kcal"),
-        F.round(F.avg("sugars_100g"), 1).alias("avg_sugars_g"),
-        F.round(F.avg("fat_100g"), 1).alias("avg_fat_g"),
-        F.round(F.avg("proteins_100g"), 1).alias("avg_proteins_g"),
-        F.round(F.avg("fiber_100g"), 1).alias("avg_fiber_g"),
-        F.round(F.avg("salt_100g"), 2).alias("avg_salt_g"),
+# NOVA group if available
+if "nova_group" in silver_columns:
+    brand_agg_exprs.append(F.round(F.avg(F.col("nova_group").cast(DoubleType())), 2).alias("avg_nova_group"))
 
-        # Ultra-processed percentage
+# Nutrition profile - only add if columns exist
+brand_nutrition_cols = [
+    ("energy_kcal_100g", "avg_energy_kcal", 1),
+    ("sugars_100g", "avg_sugars_g", 1),
+    ("fat_100g", "avg_fat_g", 1),
+    ("proteins_100g", "avg_proteins_g", 1),
+    ("fiber_100g", "avg_fiber_g", 1),
+    ("salt_100g", "avg_salt_g", 2),
+]
+for col_name, alias, precision in brand_nutrition_cols:
+    if col_name in silver_columns:
+        brand_agg_exprs.append(F.round(F.avg(col_name), precision).alias(alias))
+
+# Ultra-processed percentage
+if "is_ultra_processed" in silver_columns:
+    brand_agg_exprs.append(
         F.round(
             F.avg(F.when(F.col("is_ultra_processed") == True, 1).otherwise(0)), 3  # noqa: E712
-        ).alias("pct_ultra_processed"),
+        ).alias("pct_ultra_processed")
+    )
 
-        # Health tier distribution
+# Health tier distribution
+if "health_tier" in silver_columns:
+    brand_agg_exprs.extend([
         F.round(
             F.avg(F.when(F.col("health_tier") == "Healthy", 1).otherwise(0)), 3
         ).alias("pct_healthy"),
         F.round(
             F.avg(F.when(F.col("health_tier") == "Unhealthy", 1).otherwise(0)), 3
         ).alias("pct_unhealthy"),
+    ])
 
-        # Data quality
-        F.round(F.avg("data_quality_score"), 3).alias("avg_data_quality"),
-    )
+# Data quality - always include
+brand_agg_exprs.append(F.round(F.avg("data_quality_score"), 3).alias("avg_data_quality"))
+
+df_brand_scorecard = (
+    df_silver
+    .filter(F.col("brands").isNotNull() & (F.trim(F.col("brands")) != ""))
+    .withColumn("nutriscore_numeric", nutriscore_numeric)
+    .groupBy("brands")
+    .agg(*brand_agg_exprs)
     .filter(F.col("product_count") >= min_per_brand)
-    # Add the average grade letter
-    .withColumn("avg_nutriscore_grade", avg_to_grade("avg_nutriscore_numeric"))
-    .orderBy(F.col("product_count").desc())
 )
+
+# Add the average grade letter only if nutriscore was calculated
+if "avg_nutriscore_numeric" in df_brand_scorecard.columns:
+    df_brand_scorecard = df_brand_scorecard.withColumn("avg_nutriscore_grade", avg_to_grade("avg_nutriscore_numeric"))
+
+df_brand_scorecard = df_brand_scorecard.orderBy(F.col("product_count").desc())
 
 brand_count = df_brand_scorecard.count()
 print(f"Brands with >= {min_per_brand} products: {brand_count}")
@@ -234,48 +270,64 @@ display(df_brand_scorecard.limit(15))
 # COMMAND ----------
 
 # Start from the nutrition_by_category table we just built
-df_comparison = (
-    df_nutrition_by_cat
-    .withColumn(
+# Add rank columns only if corresponding nutrition columns exist
+comparison_columns = df_nutrition_by_cat.columns
+rank_columns = []
+
+df_comparison = df_nutrition_by_cat
+
+# Sugar rank
+if "avg_sugars_g" in comparison_columns:
+    df_comparison = df_comparison.withColumn(
         "sugar_rank",
         F.dense_rank().over(
             F.Window.orderBy(F.col("avg_sugars_g").asc_nulls_last())
         ),
     )
-    .withColumn(
+    rank_columns.append("sugar_rank")
+
+# Calorie rank
+if "avg_energy_kcal" in comparison_columns:
+    df_comparison = df_comparison.withColumn(
         "calorie_rank",
         F.dense_rank().over(
             F.Window.orderBy(F.col("avg_energy_kcal").asc_nulls_last())
         ),
     )
-    .withColumn(
+    rank_columns.append("calorie_rank")
+
+# Protein rank
+if "avg_proteins_g" in comparison_columns:
+    df_comparison = df_comparison.withColumn(
         "protein_rank",
         F.dense_rank().over(
             F.Window.orderBy(F.col("avg_proteins_g").desc_nulls_last())
         ),
     )
-    .withColumn(
+    rank_columns.append("protein_rank")
+
+# Fiber rank
+if "avg_fiber_g" in comparison_columns:
+    df_comparison = df_comparison.withColumn(
         "fiber_rank",
         F.dense_rank().over(
             F.Window.orderBy(F.col("avg_fiber_g").desc_nulls_last())
         ),
     )
-    # Composite health rank: low sugar + low calories + high protein + high fiber
-    .withColumn(
+    rank_columns.append("fiber_rank")
+
+# Composite health rank: only if at least one rank exists
+if rank_columns:
+    rank_sum = F.col(rank_columns[0])
+    for col in rank_columns[1:]:
+        rank_sum = rank_sum + F.col(col)
+    df_comparison = df_comparison.withColumn(
         "overall_health_rank",
         F.dense_rank().over(
-            F.Window.orderBy(
-                (
-                    F.col("sugar_rank")
-                    + F.col("calorie_rank")
-                    + F.col("protein_rank")
-                    + F.col("fiber_rank")
-                ).asc()
-            )
+            F.Window.orderBy(rank_sum.asc())
         ),
     )
-    .orderBy("overall_health_rank")
-)
+    df_comparison = df_comparison.orderBy("overall_health_rank")
 
 comparison_count = df_comparison.count()
 
