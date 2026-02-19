@@ -140,10 +140,20 @@ def clean_allergen_tag(tag):
     return tag.replace("-", " ").strip().title()
 
 # Handle allergens_tags as either string or array
-# First, split if it's a comma-separated string
-df_with_allergens = df_silver.filter(
-    F.col("allergens_tags").isNotNull() & (F.col("allergens_tags") != "")
-)
+# Check the data type to determine how to filter
+df_schema = {field.name: str(field.dataType) for field in df_silver.schema.fields}
+allergens_type = df_schema.get("allergens_tags", "").lower()
+
+if "array" in allergens_type:
+    # Array type: filter non-null and non-empty
+    df_with_allergens = df_silver.filter(
+        F.col("allergens_tags").isNotNull() & (F.size(F.col("allergens_tags")) > 0)
+    )
+else:
+    # String type (or other): filter non-null and not empty string
+    df_with_allergens = df_silver.filter(
+        F.col("allergens_tags").isNotNull() & (F.col("allergens_tags") != "")
+    )
 
 # Try to split — if it's already an array, this is a no-op via coalesce logic
 df_exploded = (
