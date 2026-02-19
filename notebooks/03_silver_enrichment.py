@@ -214,14 +214,27 @@ quality_components = {
     "nova_group": 0.10,
 }
 
+# Get column types to handle arrays vs strings properly
+column_types = {field.name: str(field.dataType) for field in df_enriched.schema.fields}
+
 # Build the weighted score
 quality_expr = F.lit(0.0)
 for col_name, weight in quality_components.items():
     if col_name in df_enriched.columns:
-        quality_expr = quality_expr + F.when(
-            F.col(col_name).isNotNull() & (F.col(col_name) != ""),
-            F.lit(weight),
-        ).otherwise(F.lit(0.0))
+        col_type = column_types.get(col_name, "")
+        
+        # Handle different data types for "populated" check
+        if "array" in col_type.lower():
+            # Array type: check if non-null and size > 0
+            is_populated = F.col(col_name).isNotNull() & (F.size(F.col(col_name)) > 0)
+        elif "string" in col_type.lower():
+            # String type: check if non-null and not empty
+            is_populated = F.col(col_name).isNotNull() & (F.col(col_name) != "")
+        else:
+            # Other types: just check non-null
+            is_populated = F.col(col_name).isNotNull()
+        
+        quality_expr = quality_expr + F.when(is_populated, F.lit(weight)).otherwise(F.lit(0.0))
 
 # Add nutrition completeness component (25% weight)
 quality_expr = quality_expr + (
