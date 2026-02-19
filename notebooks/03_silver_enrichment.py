@@ -265,24 +265,29 @@ display(
 
 # COMMAND ----------
 
-df_enriched = df_enriched.withColumn(
-    "product_age_days",
-    F.when(
-        F.col("created_datetime").isNotNull(),
-        F.datediff(F.current_date(), F.col("created_datetime")),
-    ).otherwise(F.lit(None)),
-)
-
-# Stats
-print("Product age statistics:")
-display(
-    df_enriched.select(
-        F.min("product_age_days").alias("min_age_days"),
-        F.max("product_age_days").alias("max_age_days"),
-        F.avg("product_age_days").alias("avg_age_days"),
-        F.percentile_approx("product_age_days", 0.5).alias("median_age_days"),
+# Check if created_datetime exists before computing product age
+if "created_datetime" in df_enriched.columns:
+    df_enriched = df_enriched.withColumn(
+        "product_age_days",
+        F.when(
+            F.col("created_datetime").isNotNull(),
+            F.datediff(F.current_date(), F.col("created_datetime")),
+        ).otherwise(F.lit(None)),
     )
-)
+    
+    # Stats
+    print("Product age statistics:")
+    display(
+        df_enriched.select(
+            F.min("product_age_days").alias("min_age_days"),
+            F.max("product_age_days").alias("max_age_days"),
+            F.avg("product_age_days").alias("avg_age_days"),
+            F.percentile_approx("product_age_days", 0.5).alias("median_age_days"),
+        )
+    )
+else:
+    print("created_datetime not found — product_age_days not computed")
+    df_enriched = df_enriched.withColumn("product_age_days", F.lit(None).cast(DoubleType()))
 
 # COMMAND ----------
 
@@ -331,8 +336,11 @@ enrichment_cols = [
     "is_ultra_processed",
     "health_tier",
     "data_quality_score",
-    "product_age_days",
 ]
+
+# Add product_age_days only if it was computed
+if "product_age_days" in df_enriched.columns:
+    enrichment_cols.append("product_age_days")
 
 print("=" * 70)
 print("SILVER ENRICHMENT SUMMARY")
