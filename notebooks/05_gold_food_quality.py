@@ -60,6 +60,13 @@ spark.sql(f"USE SCHEMA {schema}")
 df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 print(f"Silver input: {df_silver.count():,} rows")
 
+# Get available columns for dynamic handling
+silver_columns = df_silver.columns
+has_nutriscore = "nutriscore_grade" in silver_columns
+has_nova = "nova_group" in silver_columns
+
+print(f"Available columns: nutriscore_grade={has_nutriscore}, nova_group={has_nova}")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -71,54 +78,74 @@ print(f"Silver input: {df_silver.count():,} rows")
 
 # COMMAND ----------
 
-# Only products that HAVE a Nutri-Score and a country
-df_scored = df_silver.filter(
-    F.col("nutriscore_grade").isNotNull() & F.col("primary_country").isNotNull()
-)
-
-# Count per country per grade
-df_country_grade = (
-    df_scored
-    .groupBy("primary_country", "nutriscore_grade")
-    .agg(F.count("*").alias("product_count"))
-)
-
-# Get total per country for percentage calculation
-df_country_total = (
-    df_scored
-    .groupBy("primary_country")
-    .agg(F.count("*").alias("total_products"))
-    .filter(F.col("total_products") >= min_per_country)
-)
-
-# Join and calculate percentages
-df_country_nutriscore = (
-    df_country_grade
-    .join(df_country_total, "primary_country", "inner")  # inner join filters to qualifying countries
-    .withColumn(
-        "pct_of_country",
-        F.round((F.col("product_count") / F.col("total_products")) * 100, 2),
+# Only process if nutriscore_grade exists
+if has_nutriscore:
+    # Only products that HAVE a Nutri-Score and a country
+    df_scored = df_silver.filter(
+        F.col("nutriscore_grade").isNotNull() & F.col("primary_country").isNotNull()
     )
-    .orderBy("primary_country", "nutriscore_grade")
-)
 
-country_ns_count = df_country_nutriscore.select("primary_country").distinct().count()
-print(f"Countries with >= {min_per_country} scored products: {country_ns_count}")
+    # Count per country per grade
+    df_country_grade = (
+        df_scored
+        .groupBy("primary_country", "nutriscore_grade")
+        .agg(F.count("*").alias("product_count"))
+    )
 
-# Write as Unity Catalog managed table
-gold_country_ns = gold_tables["country_nutriscore"]
-df_country_nutriscore.write.mode("overwrite").option(
-    "overwriteSchema", "true"
-).saveAsTable(f"{catalog}.{schema}.{gold_country_ns}")
+    # Get total per country for percentage calculation
+    df_country_total = (
+        df_scored
+        .groupBy("primary_country")
+        .agg(F.count("*").alias("total_products"))
+        .filter(F.col("total_products") >= min_per_country)
+    )
 
-print(f"Written: {catalog}.{schema}.{gold_country_ns}")
+    # Join and calculate percentages
+    df_country_nutriscore = (
+        df_country_grade
+        .join(df_country_total, "primary_country", "inner")  # inner join filters to qualifying countries
+        .withColumn(
+            "pct_of_country",
+            F.round((F.col("product_count") / F.col("total_products")) * 100, 2),
+        )
+        .orderBy("primary_country", "nutriscore_grade")
+    )
 
-# Preview: top countries, show grade distribution
-display(
-    df_country_nutriscore
-    .filter(F.col("primary_country").isin("France", "United States", "Germany", "United Kingdom", "Spain"))
-    .orderBy("primary_country", "nutriscore_grade")
-)
+    country_ns_count = df_country_nutriscore.select("primary_country").distinct().count()
+    print(f"Countries with >= {min_per_country} scored products: {country_ns_count}")
+
+    # Write as Unity Catalog managed table
+    gold_country_ns = gold_tables["country_nutriscore"]
+    df_country_nutriscore.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_country_ns}")
+
+    print(f"Written: {catalog}.{schema}.{gold_country_ns}")
+
+    # Preview: top countries, show grade distribution
+    display(
+        df_country_nutriscore
+        .filter(F.col("primary_country").isin("France", "United States", "Germany", "United Kingdom", "Spain"))
+        .orderBy("primary_country", "nutriscore_grade")
+    )
+else:
+    # Create placeholder table
+    print("WARNING: nutriscore_grade column not found in Silver table")
+    print("Creating placeholder table with message")
+
+    df_country_nutriscore = spark.createDataFrame(
+        [("N/A", "N/A", 0, 0, 0.0, "nutriscore_grade column not available in source data")],
+        ["primary_country", "nutriscore_grade", "product_count", "total_products", "pct_of_country", "note"]
+    )
+
+    country_ns_count = 0
+
+    gold_country_ns = gold_tables["country_nutriscore"]
+    df_country_nutriscore.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_country_ns}")
+
+    print(f"Written placeholder: {catalog}.{schema}.{gold_country_ns}")
 
 # COMMAND ----------
 
@@ -133,66 +160,87 @@ display(
 
 # COMMAND ----------
 
-# Products with NOVA group and country
-df_nova = df_silver.filter(
-    F.col("nova_group").isNotNull() & F.col("primary_country").isNotNull()
-)
+# Only process if nova_group exists
+if has_nova:
+    # Products with NOVA group and country
+    df_nova = df_silver.filter(
+        F.col("nova_group").isNotNull() & F.col("primary_country").isNotNull()
+    )
 
-# Full NOVA distribution by country
-df_country_nova = (
-    df_nova
-    .groupBy("primary_country", "nova_group")
-    .agg(F.count("*").alias("product_count"))
-)
+    # Full NOVA distribution by country
+    df_country_nova = (
+        df_nova
+        .groupBy("primary_country", "nova_group")
+        .agg(F.count("*").alias("product_count"))
+    )
 
-df_nova_totals = (
-    df_nova
-    .groupBy("primary_country")
-    .agg(F.count("*").alias("total_products"))
-    .filter(F.col("total_products") >= min_per_country)
-)
-
-# Build the ultra-processing summary
-df_ultra_processing = (
-    df_nova_totals
-    .join(
+    df_nova_totals = (
         df_nova
         .groupBy("primary_country")
-        .agg(
-            # NOVA group distribution as percentages
-            F.round(F.avg(F.when(F.col("nova_group") == 1, 1).otherwise(0)) * 100, 2)
-            .alias("pct_nova_1_unprocessed"),
-
-            F.round(F.avg(F.when(F.col("nova_group") == 2, 1).otherwise(0)) * 100, 2)
-            .alias("pct_nova_2_processed_ingredients"),
-
-            F.round(F.avg(F.when(F.col("nova_group") == 3, 1).otherwise(0)) * 100, 2)
-            .alias("pct_nova_3_processed"),
-
-            F.round(F.avg(F.when(F.col("nova_group") == 4, 1).otherwise(0)) * 100, 2)
-            .alias("pct_nova_4_ultra_processed"),
-
-            # Average NOVA group (higher = more processed food supply)
-            F.round(F.avg(F.col("nova_group").cast("double")), 2)
-            .alias("avg_nova_group"),
-        ),
-        "primary_country",
-        "inner",
+        .agg(F.count("*").alias("total_products"))
+        .filter(F.col("total_products") >= min_per_country)
     )
-    .orderBy(F.col("pct_nova_4_ultra_processed").desc())
-)
 
-ultra_count = df_ultra_processing.count()
-print(f"Countries with >= {min_per_country} NOVA-classified products: {ultra_count}")
+    # Build the ultra-processing summary
+    df_ultra_processing = (
+        df_nova_totals
+        .join(
+            df_nova
+            .groupBy("primary_country")
+            .agg(
+                # NOVA group distribution as percentages
+                F.round(F.avg(F.when(F.col("nova_group") == 1, 1).otherwise(0)) * 100, 2)
+                .alias("pct_nova_1_unprocessed"),
 
-# Write as Unity Catalog managed table
-gold_ultra = gold_tables["ultra_processing_by_country"]
-df_ultra_processing.write.mode("overwrite").option(
-    "overwriteSchema", "true"
-).saveAsTable(f"{catalog}.{schema}.{gold_ultra}")
+                F.round(F.avg(F.when(F.col("nova_group") == 2, 1).otherwise(0)) * 100, 2)
+                .alias("pct_nova_2_processed_ingredients"),
 
-print(f"Written: {catalog}.{schema}.{gold_ultra}")
-display(df_ultra_processing.limit(15))
+                F.round(F.avg(F.when(F.col("nova_group") == 3, 1).otherwise(0)) * 100, 2)
+                .alias("pct_nova_3_processed"),
+
+                F.round(F.avg(F.when(F.col("nova_group") == 4, 1).otherwise(0)) * 100, 2)
+                .alias("pct_nova_4_ultra_processed"),
+
+                # Average NOVA group (higher = more processed food supply)
+                F.round(F.avg(F.col("nova_group").cast("double")), 2)
+                .alias("avg_nova_group"),
+            ),
+            "primary_country",
+            "inner",
+        )
+        .orderBy(F.col("pct_nova_4_ultra_processed").desc())
+    )
+
+    ultra_count = df_ultra_processing.count()
+    print(f"Countries with >= {min_per_country} NOVA-classified products: {ultra_count}")
+
+    # Write as Unity Catalog managed table
+    gold_ultra = gold_tables["ultra_processing_by_country"]
+    df_ultra_processing.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_ultra}")
+
+    print(f"Written: {catalog}.{schema}.{gold_ultra}")
+    display(df_ultra_processing.limit(15))
+else:
+    # Create placeholder table
+    print("WARNING: nova_group column not found in Silver table")
+    print("Creating placeholder table with message")
+
+    df_ultra_processing = spark.createDataFrame(
+        [("N/A", 0, 0.0, 0.0, 0.0, 0.0, 0.0, "nova_group column not available in source data")],
+        ["primary_country", "total_products", "pct_nova_1_unprocessed", "pct_nova_2_processed_ingredients",
+         "pct_nova_3_processed", "pct_nova_4_ultra_processed", "avg_nova_group", "note"]
+    )
+
+    ultra_count = 0
+
+    gold_ultra = gold_tables["ultra_processing_by_country"]
+    df_ultra_processing.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_ultra}")
+
+    print(f"Written placeholder: {catalog}.{schema}.{gold_ultra}")
 
 # COMMAND ----------
 
@@ -206,38 +254,63 @@ display(df_ultra_processing.limit(15))
 
 # COMMAND ----------
 
-df_cross = (
-    df_silver
-    .filter(
-        F.col("nutriscore_grade").isNotNull() & F.col("nova_group").isNotNull()
+# Only create cross-tab if both columns exist
+if has_nutriscore and has_nova:
+    df_cross = (
+        df_silver
+        .filter(
+            F.col("nutriscore_grade").isNotNull() & F.col("nova_group").isNotNull()
+        )
+        .groupBy("nova_group", "nutriscore_grade")
+        .agg(F.count("*").alias("product_count"))
     )
-    .groupBy("nova_group", "nutriscore_grade")
-    .agg(F.count("*").alias("product_count"))
-)
 
-# Calculate percentages within each NOVA group
-from pyspark.sql import Window
+    # Calculate percentages within each NOVA group
+    from pyspark.sql import Window
 
-nova_window = Window.partitionBy("nova_group")
-df_nutriscore_vs_nova = (
-    df_cross
-    .withColumn("nova_total", F.sum("product_count").over(nova_window))
-    .withColumn(
-        "pct_within_nova",
-        F.round((F.col("product_count") / F.col("nova_total")) * 100, 2),
+    nova_window = Window.partitionBy("nova_group")
+    df_nutriscore_vs_nova = (
+        df_cross
+        .withColumn("nova_total", F.sum("product_count").over(nova_window))
+        .withColumn(
+            "pct_within_nova",
+            F.round((F.col("product_count") / F.col("nova_total")) * 100, 2),
+        )
+        .orderBy("nova_group", "nutriscore_grade")
     )
-    .orderBy("nova_group", "nutriscore_grade")
-)
 
-# Write as Unity Catalog managed table
-gold_ns_nova = gold_tables["nutriscore_vs_nova"]
-df_nutriscore_vs_nova.write.mode("overwrite").option(
-    "overwriteSchema", "true"
-).saveAsTable(f"{catalog}.{schema}.{gold_ns_nova}")
+    # Write as Unity Catalog managed table
+    gold_ns_nova = gold_tables["nutriscore_vs_nova"]
+    df_nutriscore_vs_nova.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_ns_nova}")
 
-print(f"Written: {catalog}.{schema}.{gold_ns_nova}")
-print("\nNutri-Score distribution WITHIN each NOVA group:")
-display(df_nutriscore_vs_nova)
+    print(f"Written: {catalog}.{schema}.{gold_ns_nova}")
+    print("\nNutri-Score distribution WITHIN each NOVA group:")
+    display(df_nutriscore_vs_nova)
+else:
+    # Create placeholder explaining which columns are missing
+    missing_cols = []
+    if not has_nutriscore:
+        missing_cols.append("nutriscore_grade")
+    if not has_nova:
+        missing_cols.append("nova_group")
+
+    missing_msg = f"Missing columns: {', '.join(missing_cols)}. Both are required for cross-tabulation."
+    print(f"WARNING: {missing_msg}")
+    print("Creating placeholder table with message")
+
+    df_nutriscore_vs_nova = spark.createDataFrame(
+        [("N/A", "N/A", 0, 0, 0.0, missing_msg)],
+        ["nova_group", "nutriscore_grade", "product_count", "nova_total", "pct_within_nova", "note"]
+    )
+
+    gold_ns_nova = gold_tables["nutriscore_vs_nova"]
+    df_nutriscore_vs_nova.write.mode("overwrite").option(
+        "overwriteSchema", "true"
+    ).saveAsTable(f"{catalog}.{schema}.{gold_ns_nova}")
+
+    print(f"Written placeholder: {catalog}.{schema}.{gold_ns_nova}")
 
 # COMMAND ----------
 

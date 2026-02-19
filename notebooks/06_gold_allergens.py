@@ -60,6 +60,60 @@ spark.sql(f"USE SCHEMA {schema}")
 df_silver = spark.table(f"{catalog}.{schema}.{silver_table}")
 print(f"Silver input: {df_silver.count():,} rows")
 
+# Check if allergens_tags exists in the data
+if "allergens_tags" not in df_silver.columns:
+    print("\n" + "=" * 70)
+    print("WARNING: allergens_tags column not found in Silver data")
+    print("=" * 70)
+    print("Allergen analysis requires the allergens_tags column to be present.")
+    print("Creating placeholder tables so downstream processes don't fail.")
+    print("=" * 70 + "\n")
+
+    # Create placeholder table 1: allergen_prevalence
+    placeholder_prevalence = spark.createDataFrame(
+        [("No allergen data available", "N/A", 0, 0, 0.0)],
+        ["primary_category", "allergen", "products_with_allergen", "total_products_in_category", "prevalence_pct"]
+    )
+    prevalence_table = gold_tables["allergen_prevalence"]
+    (
+        placeholder_prevalence.write
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{catalog}.{schema}.{prevalence_table}")
+    )
+    print(f"Created placeholder: {catalog}.{schema}.{prevalence_table}")
+
+    # Create placeholder table 2: allergen_free_options
+    placeholder_free = spark.createDataFrame(
+        [("No allergen data available", "N/A", 0, 0, 0.0)],
+        ["primary_category", "allergen", "total_with_allergen_data", "free_from_count", "pct_free_from"]
+    )
+    free_table = gold_tables["allergen_free_options"]
+    (
+        placeholder_free.write
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{catalog}.{schema}.{free_table}")
+    )
+    print(f"Created placeholder: {catalog}.{schema}.{free_table}")
+
+    print("\n" + "=" * 70)
+    print("GOLD ALLERGEN ANALYSIS SUMMARY (SKIPPED - NO DATA)")
+    print("=" * 70)
+    print("Allergen analysis skipped: allergens_tags column not available")
+    print("=" * 70)
+
+    # Exit early
+    dbutils.notebook.exit("Skipped: allergens_tags column not available")
+
+# Defensive check for primary_category
+if "primary_category" not in df_silver.columns:
+    print("\nWARNING: primary_category column not found. Creating placeholder tables.")
+    # Create minimal schema without primary_category grouping
+    use_primary_category = False
+else:
+    use_primary_category = True
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -107,19 +161,22 @@ df_exploded = (
 )
 
 allergen_rows = df_exploded.count()
-unique_allergens = df_exploded.select("allergen").distinct().count()
+unique_allergens = df_exploded.select("allergen").distinct().count() if allergen_rows > 0 else 0
 print(f"Exploded allergen rows: {allergen_rows:,}")
 print(f"Unique allergens: {unique_allergens}")
 
-# Show top allergens
-print("\nTop 15 allergens overall:")
-display(
-    df_exploded
-    .groupBy("allergen")
-    .agg(F.countDistinct("code").alias("product_count"))
-    .orderBy(F.col("product_count").desc())
-    .limit(15)
-)
+# Show top allergens (only if data exists)
+if allergen_rows > 0:
+    print("\nTop 15 allergens overall:")
+    display(
+        df_exploded
+        .groupBy("allergen")
+        .agg(F.countDistinct("code").alias("product_count"))
+        .orderBy(F.col("product_count").desc())
+        .limit(15)
+    )
+else:
+    print("\nWarning: No allergen data found in products")
 
 # COMMAND ----------
 
@@ -134,22 +191,38 @@ display(
 
 # COMMAND ----------
 
-# Allergen prevalence by category
-df_allergen_by_cat = (
-    df_exploded
-    .filter(F.col("primary_category").isNotNull())
-    .groupBy("primary_category", "allergen")
-    .agg(F.countDistinct("code").alias("products_with_allergen"))
-)
+# Allergen prevalence by category - defensive grouping
+if use_primary_category:
+    df_allergen_by_cat = (
+        df_exploded
+        .filter(F.col("primary_category").isNotNull())
+        .groupBy("primary_category", "allergen")
+        .agg(F.countDistinct("code").alias("products_with_allergen"))
+    )
 
-# Total products per category (from all Silver, not just those with allergens)
-df_cat_totals = (
-    df_silver
-    .filter(F.col("primary_category").isNotNull())
-    .groupBy("primary_category")
-    .agg(F.countDistinct("code").alias("total_products_in_category"))
-    .filter(F.col("total_products_in_category") >= min_per_category)
-)
+    # Total products per category (from all Silver, not just those with allergens)
+    df_cat_totals = (
+        df_silver
+        .filter(F.col("primary_category").isNotNull())
+        .groupBy("primary_category")
+        .agg(F.countDistinct("code").alias("total_products_in_category"))
+        .filter(F.col("total_products_in_category") >= min_per_category)
+    )
+else:
+    # Fallback: aggregate at global level without primary_category
+    df_allergen_by_cat = (
+        df_exploded
+        .groupBy("allergen")
+        .agg(F.countDistinct("code").alias("products_with_allergen"))
+        .withColumn("primary_category", F.lit("All Products"))
+    )
+
+    # Total products without category breakdown
+    total_count = df_silver.select(F.countDistinct("code")).collect()[0][0]
+    df_cat_totals = spark.createDataFrame(
+        [("All Products", total_count)],
+        ["primary_category", "total_products_in_category"]
+    )
 
 df_allergen_prevalence = (
     df_allergen_by_cat
@@ -167,6 +240,15 @@ df_allergen_prevalence = (
 prevalence_count = df_allergen_prevalence.count()
 print(f"Allergen-category combinations: {prevalence_count:,}")
 
+# Handle empty results gracefully
+if prevalence_count == 0:
+    print("Warning: No allergen prevalence data available")
+    # Create empty DataFrame with correct schema
+    df_allergen_prevalence = spark.createDataFrame(
+        [],
+        "primary_category STRING, allergen STRING, products_with_allergen LONG, total_products_in_category LONG, prevalence_pct DOUBLE"
+    )
+
 # Write to Unity Catalog as a managed table
 prevalence_table = gold_tables["allergen_prevalence"]
 (
@@ -178,13 +260,14 @@ prevalence_table = gold_tables["allergen_prevalence"]
 
 print(f"Written: {catalog}.{schema}.{prevalence_table}")
 
-# Show: what allergens dominate in common categories?
-display(
-    df_allergen_prevalence
-    .filter(F.col("prevalence_pct") > 10)
-    .orderBy(F.col("prevalence_pct").desc())
-    .limit(20)
-)
+# Show: what allergens dominate in common categories? (only if data exists)
+if prevalence_count > 0:
+    display(
+        df_allergen_prevalence
+        .filter(F.col("prevalence_pct") > 10)
+        .orderBy(F.col("prevalence_pct").desc())
+        .limit(20)
+    )
 
 # COMMAND ----------
 
@@ -208,8 +291,10 @@ major_allergens = [
 # This requires knowing which products have allergen data at all
 
 # Products with allergen data (either they list allergens or they're flagged as allergen-free)
+# Defensive: check if traces_tags exists
 df_with_allergen_data = df_silver.filter(
-    F.col("allergens_tags").isNotNull() | F.col("traces_tags").isNotNull()
+    F.col("allergens_tags").isNotNull() | 
+    (F.col("traces_tags").isNotNull() if "traces_tags" in df_silver.columns else F.lit(False))
 )
 
 # For each major allergen, check if it's in the allergens_tags
@@ -218,47 +303,87 @@ allergen_free_dfs = []
 for allergen in major_allergens:
     allergen_lower = allergen.lower().replace(" ", "-")
 
-    df_free = (
-        df_with_allergen_data
-        .filter(F.col("primary_category").isNotNull())
-        .withColumn(
-            "contains_allergen",
-            F.when(
-                F.lower(F.col("allergens_tags").cast(StringType())).contains(allergen_lower),
-                F.lit(True),
-            ).otherwise(F.lit(False)),
+    if use_primary_category:
+        df_free = (
+            df_with_allergen_data
+            .filter(F.col("primary_category").isNotNull())
+            .withColumn(
+                "contains_allergen",
+                F.when(
+                    F.lower(F.col("allergens_tags").cast(StringType())).contains(allergen_lower),
+                    F.lit(True),
+                ).otherwise(F.lit(False)),
+            )
+            .groupBy("primary_category")
+            .agg(
+                F.count("*").alias("total_with_allergen_data"),
+                F.sum(F.when(~F.col("contains_allergen"), 1).otherwise(0)).alias("free_from_count"),
+            )
+            .filter(F.col("total_with_allergen_data") >= min_per_category)
+            .withColumn("allergen", F.lit(allergen))
+            .withColumn(
+                "pct_free_from",
+                F.round(
+                    (F.col("free_from_count") / F.col("total_with_allergen_data")) * 100, 2
+                ),
+            )
+            .select(
+                "primary_category",
+                "allergen",
+                "total_with_allergen_data",
+                "free_from_count",
+                "pct_free_from",
+            )
         )
-        .groupBy("primary_category")
-        .agg(
-            F.count("*").alias("total_with_allergen_data"),
-            F.sum(F.when(~F.col("contains_allergen"), 1).otherwise(0)).alias("free_from_count"),
+    else:
+        # Fallback: aggregate at global level
+        df_free = (
+            df_with_allergen_data
+            .withColumn(
+                "contains_allergen",
+                F.when(
+                    F.lower(F.col("allergens_tags").cast(StringType())).contains(allergen_lower),
+                    F.lit(True),
+                ).otherwise(F.lit(False)),
+            )
+            .agg(
+                F.count("*").alias("total_with_allergen_data"),
+                F.sum(F.when(~F.col("contains_allergen"), 1).otherwise(0)).alias("free_from_count"),
+            )
+            .withColumn("allergen", F.lit(allergen))
+            .withColumn("primary_category", F.lit("All Products"))
+            .withColumn(
+                "pct_free_from",
+                F.round(
+                    (F.col("free_from_count") / F.col("total_with_allergen_data")) * 100, 2
+                ),
+            )
+            .select(
+                "primary_category",
+                "allergen",
+                "total_with_allergen_data",
+                "free_from_count",
+                "pct_free_from",
+            )
         )
-        .filter(F.col("total_with_allergen_data") >= min_per_category)
-        .withColumn("allergen", F.lit(allergen))
-        .withColumn(
-            "pct_free_from",
-            F.round(
-                (F.col("free_from_count") / F.col("total_with_allergen_data")) * 100, 2
-            ),
-        )
-        .select(
-            "primary_category",
-            "allergen",
-            "total_with_allergen_data",
-            "free_from_count",
-            "pct_free_from",
-        )
-    )
     allergen_free_dfs.append(df_free)
 
 # Union all allergen DataFrames
 from functools import reduce
 
-df_allergen_free = reduce(lambda a, b: a.unionByName(b), allergen_free_dfs)
-df_allergen_free = df_allergen_free.orderBy("primary_category", "allergen")
-
-free_count = df_allergen_free.count()
-print(f"Category-allergen free-from combinations: {free_count:,}")
+if allergen_free_dfs:
+    df_allergen_free = reduce(lambda a, b: a.unionByName(b), allergen_free_dfs)
+    df_allergen_free = df_allergen_free.orderBy("primary_category", "allergen")
+    free_count = df_allergen_free.count()
+    print(f"Category-allergen free-from combinations: {free_count:,}")
+else:
+    # Create empty DataFrame with correct schema if no data
+    df_allergen_free = spark.createDataFrame(
+        [],
+        "primary_category STRING, allergen STRING, total_with_allergen_data LONG, free_from_count LONG, pct_free_from DOUBLE"
+    )
+    free_count = 0
+    print("Warning: No allergen-free data available")
 
 # Write to Unity Catalog as a managed table
 free_table = gold_tables["allergen_free_options"]
@@ -271,14 +396,15 @@ free_table = gold_tables["allergen_free_options"]
 
 print(f"Written: {catalog}.{schema}.{free_table}")
 
-# Show: which categories have the most gluten-free options?
-print("\nCategories with highest % gluten-free products:")
-display(
-    df_allergen_free
-    .filter(F.col("allergen") == "Gluten")
-    .orderBy(F.col("pct_free_from").desc())
-    .limit(15)
-)
+# Show: which categories have the most gluten-free options? (only if data exists)
+if free_count > 0:
+    print("\nCategories with highest % gluten-free products:")
+    display(
+        df_allergen_free
+        .filter(F.col("allergen") == "Gluten")
+        .orderBy(F.col("pct_free_from").desc())
+        .limit(15)
+    )
 
 # COMMAND ----------
 
