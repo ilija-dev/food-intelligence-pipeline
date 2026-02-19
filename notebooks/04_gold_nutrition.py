@@ -340,17 +340,21 @@ print(f"Written: {catalog}.{schema}.{gold_tables['category_comparison']} ({compa
 
 # Show healthiest categories
 print("\nTop 15 healthiest categories (by composite rank):")
-display(
-    df_comparison.select(
-        "primary_category",
-        "product_count",
-        "avg_energy_kcal",
-        "avg_sugars_g",
-        "avg_proteins_g",
-        "avg_fiber_g",
-        "overall_health_rank",
-    ).limit(15)
-)
+
+# Build select list based on available columns
+comparison_columns = df_comparison.columns
+select_cols = ["primary_category", "product_count"]
+
+# Add nutrition columns if they exist
+for col in ["avg_energy_kcal", "avg_sugars_g", "avg_proteins_g", "avg_fiber_g"]:
+    if col in comparison_columns:
+        select_cols.append(col)
+
+# Always include rank
+if "overall_health_rank" in comparison_columns:
+    select_cols.append("overall_health_rank")
+
+display(df_comparison.select(*select_cols).limit(15))
 
 # COMMAND ----------
 
