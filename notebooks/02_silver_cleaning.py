@@ -425,7 +425,7 @@ display(
 
 @F.udf(StringType())
 def extract_primary_country(countries):
-    """Extract the first country from countries_tags, cleaned to readable format."""
+    """Extract the first country from countries_tags, cleaned to filesystem-safe format."""
     if countries is None:
         return None
 
@@ -445,7 +445,17 @@ def extract_primary_country(countries):
         first = first.split(":", 1)[1]
 
     # Clean up: "united-states" → "United States"
-    return first.replace("-", " ").strip().title()
+    country = first.replace("-", " ").strip().title()
+    
+    # SANITIZE: Remove non-ASCII characters that break S3 paths
+    # Keep only alphanumeric, spaces, and common punctuation
+    import re
+    # Replace any non-ASCII or control characters
+    country = re.sub(r'[^\x20-\x7E]', '', country)  # Only printable ASCII
+    # Normalize multiple spaces
+    country = re.sub(r'\s+', ' ', country).strip()
+    
+    return country if country else "Unknown"
 
 
 @F.udf(IntegerType())
