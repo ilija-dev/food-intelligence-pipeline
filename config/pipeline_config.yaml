@@ -149,7 +149,9 @@ quality:
 partitioning:
   silver:
     # Partition Silver by primary_country for efficient country-level queries
-    partition_by: "primary_country"
+    # NOTE: Disabled due to unicode characters in some country names causing S3 path issues
+    # partition_by: "primary_country"
+    partition_by: null
   gold:
     nutrition_by_category:
       partition_by: null      # Small enough, no partitioning needed
