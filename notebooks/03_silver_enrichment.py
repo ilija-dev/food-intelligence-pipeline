@@ -99,18 +99,27 @@ core_nutrients = [
 available_nutrients = [n for n in core_nutrients if n in df_silver.columns]
 
 # Count non-null nutrients per row, divide by total
-non_null_count = sum(
-    F.when(F.col(n).isNotNull(), F.lit(1)).otherwise(F.lit(0))
-    for n in available_nutrients
-)
-
-df_enriched = df_silver.withColumn(
-    "nutrition_completeness",
-    (non_null_count / F.lit(len(available_nutrients))).cast(DoubleType()),
-)
+if available_nutrients:
+    non_null_count = sum(
+        F.when(F.col(n).isNotNull(), F.lit(1)).otherwise(F.lit(0))
+        for n in available_nutrients
+    )
+    df_enriched = df_silver.withColumn(
+        "nutrition_completeness",
+        (non_null_count / F.lit(len(available_nutrients))).cast(DoubleType()),
+    )
+else:
+    # No nutrition columns available — set completeness to 0.0
+    df_enriched = df_silver.withColumn(
+        "nutrition_completeness",
+        F.lit(0.0).cast(DoubleType()),
+    )
 
 # Show distribution
-print(f"Nutrition completeness (based on {len(available_nutrients)} core nutrients):\n")
+if available_nutrients:
+    print(f"Nutrition completeness (based on {len(available_nutrients)} core nutrients):\n")
+else:
+    print("No nutrition columns found — nutrition_completeness set to 0.0 for all rows\n")
 display(
     df_enriched.groupBy(
         F.round(F.col("nutrition_completeness"), 1).alias("completeness_bucket")
