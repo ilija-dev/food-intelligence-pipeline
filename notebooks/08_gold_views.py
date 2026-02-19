@@ -88,23 +88,28 @@ print(f"vw_high_quality_products: {hq_count:,} rows (data_quality >= 0.7, nutrit
 
 # COMMAND ----------
 
+# Get actual columns from Silver to build dynamic view
+df_silver_check = spark.table(f"{full_schema}.silver_products")
+silver_cols = df_silver_check.columns
+
+# Build column list based on available columns
+search_columns = [
+    "code", "product_name", "brands", "primary_category", "primary_country",
+    "nutriscore_grade", "nova_group", "health_tier", "is_ultra_processed",
+    "data_quality_score"
+]
+# Add nutrition columns if they exist
+nutrition_cols = ["energy_kcal_100g", "sugars_100g", "proteins_100g", "fiber_100g"]
+for col in nutrition_cols:
+    if col in silver_cols:
+        search_columns.append(col)
+
+cols_str = ",\n        ".join(search_columns)
+
 spark.sql(f"""
     CREATE OR REPLACE VIEW {full_schema}.vw_product_search AS
     SELECT
-        code,
-        product_name,
-        brands,
-        primary_category,
-        primary_country,
-        nutriscore_grade,
-        nova_group,
-        health_tier,
-        energy_kcal_100g,
-        sugars_100g,
-        proteins_100g,
-        fiber_100g,
-        is_ultra_processed,
-        data_quality_score
+        {cols_str}
     FROM {full_schema}.silver_products
     WHERE product_name IS NOT NULL
       AND code IS NOT NULL
@@ -166,43 +171,76 @@ print(f"vw_country_health_overview: {overview_count:,} countries")
 
 # COMMAND ----------
 
-spark.sql(f"""
-    CREATE OR REPLACE VIEW {full_schema}.vw_category_nutrition AS
-    SELECT
-        primary_category,
-        product_count,
-        avg_energy_kcal,
-        avg_sugars_g,
-        avg_fat_g,
-        avg_proteins_g,
-        avg_fiber_g,
-        avg_salt_g,
+# Get actual columns from gold_category_comparison to build dynamic view
+df_cat_check = spark.table(f"{full_schema}.gold_category_comparison")
+cat_cols = df_cat_check.columns
 
-        -- Interpretive columns for dashboards
+# Build column list based on available columns
+base_cat_columns = [
+    "primary_category",
+    "product_count",
+]
+
+# Add nutrition columns if they exist
+nutrition_agg_cols = ["avg_energy_kcal", "avg_sugars_g", "avg_fat_g", "avg_proteins_g", "avg_fiber_g", "avg_salt_g"]
+available_nutrition_cols = [col for col in nutrition_agg_cols if col in cat_cols]
+
+# Add other metadata columns
+metadata_cols = ["avg_nutrition_completeness", "overall_health_rank"]
+available_metadata_cols = [col for col in metadata_cols if col in cat_cols]
+
+# Combine all columns
+cat_select_columns = base_cat_columns + available_nutrition_cols + available_metadata_cols
+
+cat_cols_str = ",\n        ".join(cat_select_columns)
+
+# Build CASE statements only for columns that exist
+case_statements = []
+
+if "avg_sugars_g" in cat_cols:
+    case_statements.append("""
         CASE
             WHEN avg_sugars_g > 20 THEN 'High Sugar'
             WHEN avg_sugars_g > 10 THEN 'Moderate Sugar'
             ELSE 'Low Sugar'
-        END AS sugar_level,
+        END AS sugar_level""")
 
+if "avg_energy_kcal" in cat_cols:
+    case_statements.append("""
         CASE
             WHEN avg_energy_kcal > 400 THEN 'High Calorie'
             WHEN avg_energy_kcal > 200 THEN 'Moderate Calorie'
             ELSE 'Low Calorie'
-        END AS calorie_level,
+        END AS calorie_level""")
 
+if "avg_proteins_g" in cat_cols:
+    case_statements.append("""
         CASE
             WHEN avg_proteins_g > 15 THEN 'High Protein'
             WHEN avg_proteins_g > 5 THEN 'Moderate Protein'
             ELSE 'Low Protein'
-        END AS protein_level,
+        END AS protein_level""")
 
-        avg_nutrition_completeness,
-        overall_health_rank
+case_str = ",".join(case_statements) if case_statements else ""
 
-    FROM {full_schema}.gold_category_comparison
-    ORDER BY overall_health_rank
-""")
+# Build the complete SQL
+if case_str:
+    cat_sql = f"""
+        CREATE OR REPLACE VIEW {full_schema}.vw_category_nutrition AS
+        SELECT
+            {cat_cols_str},{case_str}
+        FROM {full_schema}.gold_category_comparison
+        ORDER BY overall_health_rank
+    """
+else:
+    cat_sql = f"""
+        CREATE OR REPLACE VIEW {full_schema}.vw_category_nutrition AS
+        SELECT
+            {cat_cols_str}
+        FROM {full_schema}.gold_category_comparison
+    """
+
+spark.sql(cat_sql)
 
 cat_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_category_nutrition").collect()[0]["cnt"]
 print(f"vw_category_nutrition: {cat_view_count:,} categories with interpretive labels")
@@ -216,27 +254,47 @@ print(f"vw_category_nutrition: {cat_view_count:,} categories with interpretive l
 
 # COMMAND ----------
 
+# Get actual columns from gold_brand_scorecard to build dynamic view
+df_brand_check = spark.table(f"{full_schema}.gold_brand_scorecard")
+brand_cols = df_brand_check.columns
+
+# Build column list based on available columns
+possible_brand_columns = [
+    "brands",
+    "product_count",
+    "avg_nutriscore_grade",
+    "avg_nutriscore_numeric",
+    "avg_nova_group",
+    "pct_healthy",
+    "pct_unhealthy",
+    "pct_ultra_processed",
+    "avg_energy_kcal",
+    "avg_sugars_g",
+    "avg_proteins_g",
+]
+
+available_brand_columns = [col for col in possible_brand_columns if col in brand_cols]
+brand_cols_str = ",\n        ".join(available_brand_columns)
+
+# Determine ORDER BY clause (use avg_nutriscore_numeric if available)
+if "avg_nutriscore_numeric" in brand_cols:
+    rank_clause = "DENSE_RANK() OVER (ORDER BY avg_nutriscore_numeric ASC) AS health_rank"
+    order_clause = "ORDER BY health_rank"
+    where_clause = "WHERE avg_nutriscore_numeric IS NOT NULL"
+else:
+    # Fallback if no numeric score available
+    rank_clause = "ROW_NUMBER() OVER (ORDER BY brands) AS row_num"
+    order_clause = "ORDER BY row_num"
+    where_clause = ""
+
 spark.sql(f"""
     CREATE OR REPLACE VIEW {full_schema}.vw_brand_leaderboard AS
     SELECT
-        brands,
-        product_count,
-        avg_nutriscore_grade,
-        avg_nutriscore_numeric,
-        avg_nova_group,
-        pct_healthy,
-        pct_unhealthy,
-        pct_ultra_processed,
-        avg_energy_kcal,
-        avg_sugars_g,
-        avg_proteins_g,
-
-        -- Rank brands by health score (lower nutriscore_numeric = healthier)
-        DENSE_RANK() OVER (ORDER BY avg_nutriscore_numeric ASC) AS health_rank
-
+        {brand_cols_str},
+        {rank_clause}
     FROM {full_schema}.gold_brand_scorecard
-    WHERE avg_nutriscore_numeric IS NOT NULL
-    ORDER BY health_rank
+    {where_clause}
+    {order_clause}
 """)
 
 brand_view_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_schema}.vw_brand_leaderboard").collect()[0]["cnt"]
